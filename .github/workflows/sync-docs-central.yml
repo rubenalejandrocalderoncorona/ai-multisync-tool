@@ -1,0 +1,303 @@
+name: Sync Documentation
+
+# ============================================================
+# LISTENER ON MAIN, WORKER ON ANY TARGET BRANCH
+# ============================================================
+# This workflow MUST live on the 'main' branch of your central docs repo
+# to receive repository_dispatch events from source service repos.
+#
+# All file work (checkout, sync, push) happens on the TARGET BRANCH
+# resolved at runtime — no branch name is hardcoded here.
+#
+# Routing table (first match wins):
+#   repository_dispatch  →  client_payload.target_branch
+#   workflow_dispatch    →  inputs.target_branch
+#
+# Deployment:
+#   If you have a deploy workflow (e.g. deploy.yml), trigger it on push
+#   to your desired branch (e.g. 'main' or 'staging').
+# ============================================================
+
+on:
+  repository_dispatch:
+    types: [docs-updated]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Source repository (e.g., your-org/your-service)'
+        required: true
+        default: ''
+      source_ref:
+        description: 'Source branch/commit/SHA to sync from'
+        required: true
+        default: ''
+      target_branch:
+        description: 'Branch in this repo to write synced docs into'
+        required: true
+        default: 'main'
+      target_file:
+        description: 'Specific file to sync (e.g. docs/my-guide.md). Leave blank for all changed files.'
+        required: false
+        default: ''
+      instructions_file:
+        description: 'Custom instructions file path (e.g. .github/instructions/my-service.md). Leave blank for default.'
+        required: false
+        default: ''
+
+# One run per target branch at a time — queues rather than cancels, so no
+# dispatch is dropped when two source repos sync concurrently.
+concurrency:
+  group: sync-docs-${{ github.event.client_payload.target_branch || github.event.inputs.target_branch }}
+  cancel-in-progress: false
+
+jobs:
+  sync-docs:
+    runs-on: ubuntu-latest   # Change to self-hosted if you use a private runner
+
+    steps:
+      # ============================================================
+      # CHECKOUT: Central Repository (THIS REPO)
+      # ============================================================
+      - name: Checkout documentation repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          ref: main
+          persist-credentials: true
+
+      - name: Resolve target branch
+        id: target_branch
+        run: |
+          if [ -n "${{ github.event.client_payload.target_branch }}" ]; then
+            TARGET_BRANCH="${{ github.event.client_payload.target_branch }}"
+          elif [ -n "${{ github.event.inputs.target_branch }}" ]; then
+            TARGET_BRANCH="${{ github.event.inputs.target_branch }}"
+          else
+            echo "❌ ERROR: target_branch was not provided."
+            exit 1
+          fi
+          echo "target_branch=$TARGET_BRANCH" >> $GITHUB_OUTPUT
+          echo "📌 Target branch: $TARGET_BRANCH"
+
+      - name: Resolve instructions file
+        id: instructions_file
+        run: |
+          if [ -n "${{ github.event.client_payload.instructions_file }}" ]; then
+            INSTRUCTIONS_FILE="${{ github.event.client_payload.instructions_file }}"
+          elif [ -n "${{ github.event.inputs.instructions_file }}" ]; then
+            INSTRUCTIONS_FILE="${{ github.event.inputs.instructions_file }}"
+          else
+            INSTRUCTIONS_FILE=""
+          fi
+          echo "instructions_file=$INSTRUCTIONS_FILE" >> $GITHUB_OUTPUT
+
+      # ============================================================
+      # PRESERVE SCRIPTS FROM MAIN
+      # ============================================================
+      # The workflow file lives on main (required for repository_dispatch).
+      # After switching to the target branch, scripts/ reflects that branch
+      # not main. Copy scripts to a temp location before the branch switch
+      # so the runner always uses the latest main versions.
+      - name: Preserve scripts from main
+        run: cp -r scripts/ /tmp/aimultisync-scripts/
+
+      - name: Switch to target branch
+        run: |
+          TARGET_BRANCH="${{ steps.target_branch.outputs.target_branch }}"
+          git fetch origin "${TARGET_BRANCH}:${TARGET_BRANCH}" 2>/dev/null || \
+            git checkout -b "${TARGET_BRANCH}"
+          git checkout "${TARGET_BRANCH}"
+
+      - name: Restore scripts from main
+        run: cp -r /tmp/aimultisync-scripts/. scripts/
+
+      # ============================================================
+      # SAFETY GUARD: never write to main/master directly
+      # ============================================================
+      - name: Verify branch safety
+        run: |
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          if [[ "$CURRENT_BRANCH" == "main" ]] || [[ "$CURRENT_BRANCH" == "master" ]]; then
+            echo "❌ FATAL: Refusing to sync directly to $CURRENT_BRANCH."
+            echo "   Set TARGET_BRANCH to a non-protected branch (e.g. 'staging' or 'docs/incoming')."
+            exit 1
+          fi
+          echo "✅ Branch safety check passed: $CURRENT_BRANCH"
+
+      # ============================================================
+      # DETERMINE SOURCE REF
+      # ============================================================
+      - name: Determine source repository ref
+        id: source_ref
+        run: |
+          if [ -n "${{ github.event.client_payload.sha }}" ]; then
+            SOURCE_REF="${{ github.event.client_payload.sha }}"
+          elif [ -n "${{ github.event.client_payload.ref }}" ]; then
+            SOURCE_REF="${{ github.event.client_payload.ref }}"
+          elif [ -n "${{ github.event.inputs.source_ref }}" ]; then
+            SOURCE_REF="${{ github.event.inputs.source_ref }}"
+          else
+            echo "❌ ERROR: source_ref was not provided."
+            exit 1
+          fi
+          echo "source_ref=$SOURCE_REF" >> $GITHUB_OUTPUT
+          echo "✅ Source ref: $SOURCE_REF"
+
+      # ============================================================
+      # CHECKOUT: Source Service Repository
+      # ============================================================
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
+          ref: ${{ steps.source_ref.outputs.source_ref }}
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          path: source-repo
+          fetch-depth: 0
+
+      # ============================================================
+      # NODE.JS SETUP
+      # ============================================================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # ============================================================
+      # GET CHANGED FILES
+      # ============================================================
+      - name: Get changed documentation files
+        id: changed-files
+        working-directory: source-repo
+        run: |
+          DOC_PATHS="docs documentation"
+          CHANGED_FILES=""
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET_FILE="${{ github.event.inputs.target_file }}"
+            if [ -n "$TARGET_FILE" ]; then
+              echo "🎯 Single-file sync: $TARGET_FILE"
+              if [ -f "$TARGET_FILE" ]; then
+                CHANGED_FILES="$TARGET_FILE"
+              else
+                echo "❌ ERROR: '$TARGET_FILE' not found in source repo."
+                exit 1
+              fi
+            else
+              for doc_path in $DOC_PATHS; do
+                if [ -d "$doc_path" ]; then
+                  FILES=$(find "$doc_path" -name "*.md" -o -name "*.mdx" 2>/dev/null)
+                  [ -n "$FILES" ] && CHANGED_FILES="$CHANGED_FILES $FILES"
+                fi
+              done
+            fi
+          else
+            if [ -n "${{ github.event.client_payload.changed_files }}" ]; then
+              CHANGED_FILES="${{ github.event.client_payload.changed_files }}"
+            else
+              for doc_path in $DOC_PATHS; do
+                FILES=$(git diff --name-only HEAD~1 HEAD -- "$doc_path/" 2>/dev/null)
+                [ -n "$FILES" ] && CHANGED_FILES="$CHANGED_FILES $FILES"
+              done
+            fi
+          fi
+
+          # Filter out .github/ paths — workflow files must never be synced as docs
+          CHANGED_FILES_OUTPUT=$(echo "$CHANGED_FILES" | tr ' ' '\n' | sed '/^$/d' | grep -v '^\.github/' | sort -u)
+
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_FILES_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "📋 Changed files:"
+          echo "$CHANGED_FILES_OUTPUT"
+
+      # ============================================================
+      # AI ANALYSIS
+      # ============================================================
+      - name: Run AI Analysis
+        env:
+          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
+          AI_SUMMARY: ${{ github.event.client_payload.ai_summary }}
+          INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_API_HOST: ${{ vars.AI_API_HOST || 'api.openai.com' }}
+          AI_API_PATH: ${{ vars.AI_API_PATH || '/v1/chat/completions' }}
+          AI_MODEL: ${{ vars.AI_MODEL || 'gpt-4o' }}
+          SOURCE_REF: ${{ steps.source_ref.outputs.source_ref }}
+          INSTRUCTIONS_FILE: ${{ steps.instructions_file.outputs.instructions_file }}
+        run: node scripts/analyze_docs.js
+
+      # ============================================================
+      # SYNC FILES
+      # ============================================================
+      - name: Sync Documentation Files
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
+          SOURCE_REF: ${{ steps.source_ref.outputs.source_ref }}
+          SOURCE_SHA: ${{ github.event.client_payload.sha || '' }}
+          INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_API_HOST: ${{ vars.AI_API_HOST || 'api.openai.com' }}
+          AI_API_PATH: ${{ vars.AI_API_PATH || '/v1/chat/completions' }}
+          AI_MODEL: ${{ vars.AI_MODEL || 'gpt-4o' }}
+          BRANCH_NAME: ${{ github.event.client_payload.ref || github.event.inputs.source_ref }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
+          INSTRUCTIONS_FILE: ${{ steps.instructions_file.outputs.instructions_file }}
+          SERVICE_NAME: ${{ github.event.client_payload.service_name || '' }}
+          TARGET_PATH: ${{ github.event.client_payload.target_path || '' }}
+          TEMPLATES_PATH: ${{ github.event.client_payload.templates_path || '' }}
+          GITHUB_HOST: ${{ vars.GITHUB_HOST || 'github.com' }}
+        run: |
+          if [ -z "$SOURCE_SHA" ]; then
+            SOURCE_SHA=$(git -C source-repo rev-parse HEAD)
+          fi
+          node scripts/sync_docs.js
+
+      # ============================================================
+      # UPDATE SIDEBAR
+      # ============================================================
+      - name: Update Sidebar
+        run: node scripts/update_sidebar.js
+
+      # ============================================================
+      # COMMIT AND PUSH
+      # ============================================================
+      - name: Commit and push changes
+        run: |
+          git config user.name "Documentation Bot"
+          git config user.email "docs-bot@noreply.github.com"
+
+          git add docs/services/ || true
+          git add "docs/services/*/sidebar.js" || true
+
+          if git diff --staged --quiet; then
+            echo "ℹ️  No changes to commit"
+          else
+            REPO_NAME=$(echo "${{ github.event.client_payload.repository || github.event.inputs.source_repo }}" | cut -d'/' -f2)
+            SOURCE_REF="${{ steps.source_ref.outputs.source_ref }}"
+            SOURCE_SHA="${{ github.event.client_payload.sha || 'manual trigger' }}"
+
+            git commit -m "docs: auto-sync from ${REPO_NAME}
+
+          Source: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
+          Ref: ${SOURCE_REF}
+          Commit: ${SOURCE_SHA}
+          Target: ${{ steps.target_branch.outputs.target_branch }}
+          Synced: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+            TARGET_BRANCH="${{ steps.target_branch.outputs.target_branch }}"
+            git push origin "${TARGET_BRANCH}"
+            echo "✅ Pushed to ${TARGET_BRANCH}"
+          fi
+
+      # ============================================================
+      # JOB SUMMARY
+      # ============================================================
+      - name: Generate Job Summary
+        if: always()
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
+          SOURCE_REF: ${{ steps.source_ref.outputs.source_ref }}
+          SOURCE_SHA: ${{ github.event.client_payload.sha || 'N/A' }}
+          TARGET_BRANCH: ${{ steps.target_branch.outputs.target_branch }}
+          INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        run: node scripts/generate-summary.js >> $GITHUB_STEP_SUMMARY
