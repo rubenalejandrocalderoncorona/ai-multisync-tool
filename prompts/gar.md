@@ -1,0 +1,1 @@
+Write ONE short paragraph, exactly as it would appear in published documentation, stating what the change makes true for a reader. Use the vocabulary the project's own docs would use. State only what the input shows. No preamble, no lists, no headings.

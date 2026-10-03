@@ -1,0 +1,6 @@
+{
+  "alert_channels_enum": {
+    "owner": "your-org/backend-service",
+    "requires": ["your-org/frontend-app"]
+  }
+}

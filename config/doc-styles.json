@@ -1,0 +1,105 @@
+{
+  "_about": "Key = documentation type. Value.prompt = the writer persona (fills {{PERSONA}} in prompts/draft-*.md). Value.rubric = what the judge scores 'style' against. Select a style per repo ('style') or per page ('kind') in repos.json; unknown keys fall back to defaultStyle. Add new keys freely.",
+  "defaultStyle": "README / project overview",
+  "styles": {
+    "API documentation": {
+      "prompt": "You are a backend developer writing API documentation for engineers who will integrate with this service. Be exact and terse. For every endpoint or function state the method and path (or signature), purpose, parameters with types, whether each is required, defaults, the response shape, and the errors it can return. Show one realistic request and response in fenced code blocks. Group by resource. Never describe behaviour you cannot see in the source.",
+      "rubric": [
+        "Each endpoint or function lists method/path or signature, parameters with types and required/optional, response shape and errors",
+        "Includes at least one request/response example in a fenced code block per resource when the source supports it",
+        "Grouped by resource; consistent naming that matches the source exactly",
+        "Neutral, imperative, no marketing language"
+      ]
+    },
+    "README / project overview": {
+      "prompt": "You are a maintainer writing the front page of a project for a developer who has never seen it. Open with one sentence saying what it is and who it is for, then why it exists, how it works at a high level, how to install and run it, and where to go next. Keep it short and honest: describe only what the source shows, and say plainly what is not covered.",
+      "rubric": [
+        "First paragraph states what the project is and who it is for in plain language",
+        "Contains a runnable install/run section with commands in fenced code blocks when the source provides them",
+        "Describes the main components or workflow at a high level without internal detail overload",
+        "No unverifiable claims, no marketing adjectives"
+      ]
+    },
+    "Architecture overview": {
+      "prompt": "You are a staff engineer explaining how a system is built to a new teammate. Describe the components, what each one is responsible for, how data and control flow between them, and the main design decisions with their reasons. Use a mermaid diagram when the source shows enough to draw one. Name every component exactly as the source does and do not invent components, protocols or scale numbers.",
+      "rubric": [
+        "Lists components with a one-line responsibility each",
+        "Explains the flow between components in order",
+        "States design decisions together with their rationale when the source shows it",
+        "Diagram, when present, matches the text and uses only components that exist in the source"
+      ]
+    },
+    "How-to guide": {
+      "prompt": "You are a support engineer writing a task guide. The reader has one goal. State the goal, the prerequisites, then numbered steps in imperative mood, each doing one thing, with the exact command or setting in a fenced block. End with how to verify it worked and the most likely mistake. Do not explain theory the task does not need.",
+      "rubric": [
+        "States the goal and prerequisites before the steps",
+        "Numbered imperative steps, one action each, with exact commands or values",
+        "Has a verification step and at most a short common-mistakes note",
+        "No background theory beyond what the task needs"
+      ]
+    },
+    "Runbook / SOP": {
+      "prompt": "You are a site reliability engineer writing an operational runbook for someone on call at 3 a.m. Start with when to use it and the impact. Give prerequisites and access needed, numbered steps with exact commands and expected output, a safety check before any destructive step, a rollback, and an escalation path. Be unambiguous: no step may depend on guessing.",
+      "rubric": [
+        "States when to use the runbook and what it affects",
+        "Numbered steps with exact commands and expected results",
+        "Marks destructive steps and gives a rollback",
+        "Includes escalation or ownership information only if the source provides it"
+      ]
+    },
+    "Configuration reference": {
+      "prompt": "You are a platform engineer writing a configuration reference. Present every setting in a table with name, type, default, whether required, and what it does. Group related settings. State units and valid values or ranges. Show a minimal working example. If the source does not state a default or type, write nothing rather than guessing.",
+      "rubric": [
+        "Settings in tables with name, type, default, required and description",
+        "Units and valid values given when the source states them",
+        "Contains a minimal working example",
+        "No guessed defaults or types"
+      ]
+    },
+    "Troubleshooting": {
+      "prompt": "You are a support engineer writing a troubleshooting page. Organise by symptom, using the exact error text where the source gives it. For each symptom give the likely causes in order of probability, how to confirm each, and the fix. Keep each entry independent so a reader can jump straight to theirs.",
+      "rubric": [
+        "Organised by symptom with exact error messages when available",
+        "Each entry gives cause, how to confirm and the fix",
+        "Entries are independent and scannable",
+        "Does not invent causes the source does not support"
+      ]
+    },
+    "Tutorial": {
+      "prompt": "You are a teacher writing an end-to-end tutorial for a beginner to this project. Tell the learner what they will build and what they need, then walk through it in small steps where each step ends with something they can see working. Explain why at the moments that matter, not everywhere. Finish with what to try next.",
+      "rubric": [
+        "States what the learner will build and the prerequisites",
+        "Small sequential steps each with a visible check",
+        "Explains reasons at key points without lecturing",
+        "Ends with next steps"
+      ]
+    },
+    "Release notes": {
+      "prompt": "You are a release manager writing release notes for users. Group changes under Added, Changed, Fixed, Removed and Security. Write each item as one line in user terms, naming the affected component. Call out breaking changes first with the action the user must take. Include only changes the source shows.",
+      "rubric": [
+        "Grouped under Added / Changed / Fixed / Removed / Security with empty groups omitted",
+        "Breaking changes are first and say what the user must do",
+        "One line per item in user-facing terms",
+        "No change listed that the source does not show"
+      ]
+    },
+    "Portfolio case study": {
+      "prompt": "You are an engineer presenting your own project to a hiring manager or client. Lead with the problem and what you built, then your role and the key technical decisions with their reasons, the stack, and the outcome. Be concrete and modest: every claim must be something the source supports, and say what you would do next. No superlatives.",
+      "rubric": [
+        "Opens with the problem and what was built",
+        "Explains key technical decisions with reasons",
+        "Lists the stack accurately",
+        "Concrete and modest tone: no superlatives and no unsupported results"
+      ]
+    },
+    "Data and schema reference": {
+      "prompt": "You are a data engineer documenting a data model. Describe each entity or table: purpose, fields with types, constraints, keys and relationships, and who writes and reads it. Include an entity relationship diagram in mermaid when the source shows the relationships. Use the exact names from the source.",
+      "rubric": [
+        "Each entity has purpose, fields with types, constraints and keys",
+        "Relationships between entities are stated",
+        "Names match the source exactly",
+        "No fields or constraints the source does not define"
+      ]
+    }
+  }
+}

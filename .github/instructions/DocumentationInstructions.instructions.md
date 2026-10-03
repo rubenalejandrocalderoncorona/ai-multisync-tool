@@ -12,8 +12,8 @@ applyTo: '**'
 
 ## File Format Standards
 - Use .md for standard documentation without React components
-- Use .mdx for documents requiring React components (ZoomableImage, Tabs, TabItem)
-- Always include proper frontmatter with id, title, and sidebar_position
+- Use .mdx for documents requiring Starlight components (Tabs, TabItem, Card, Steps from `@astrojs/starlight/components`)
+- Frontmatter is injected by the sync pipeline (title, description, source, commit); do not write your own
 - Use consistent heading hierarchy starting with ## (never use single #)
 - Include required imports at top of MDX files
 
@@ -31,7 +31,7 @@ applyTo: '**'
 - Tables: Use proper markdown table formatting with headers
 
 ## Callout Standards
-- Use Docusaurus callout format: :::info, :::warning, :::danger, :::tip
+- Use Starlight aside format: :::note, :::tip, :::caution, :::danger
 - Always include descriptive titles for callouts
 - Preserve exact callout content from source material
 
@@ -43,7 +43,7 @@ applyTo: '**'
 - Include Troubleshooting sections for operational guides
 
 ## Required Documentation Sections
-- Frontmatter: id, title, sidebar_position (and imports for MDX)
+- Frontmatter: title and description (injected by the pipeline)
 - Description: Brief overview of document content
 - Main content: Organized with clear headings
 - References: Links to related documentation and external resources

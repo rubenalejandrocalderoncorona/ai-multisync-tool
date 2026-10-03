@@ -1,0 +1,15 @@
+{
+  "defaults": {
+    "trust": "review",
+    "styleGuide": "Plain, direct English. Imperative mood for procedures. Short paragraphs. Keep product and tool names exactly as written.",
+    "glossary": {}
+  },
+  "repos": {
+    "your-org/your-service": {
+      "trust": "auto",
+      "serviceName": "your-service",
+      "styleGuide": "Concise reference style. Prefer tables for configuration.",
+      "glossary": { "FactStore": "our Postgres-backed claim store (not the FactScore method)" }
+    }
+  }
+}

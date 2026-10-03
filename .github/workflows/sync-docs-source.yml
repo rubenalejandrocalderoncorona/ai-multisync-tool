@@ -1,248 +1,86 @@
 name: Sync Documentation to Central Repo
 
 # ============================================================
-# SOURCE REPO WORKFLOW
-# ============================================================
-# Copy this file into any service repository that wants to sync
-# documentation to a central Docusaurus site.
+# SOURCE REPO WORKFLOW — copy into each service repository.
 #
-# Configuration is done through the top-level 'env' block below.
-# No other changes are needed in most cases.
+# On a push, it dispatches to the central docs repo. All decisions (is this
+# worth documenting? is the draft grounded?) are made centrally by the pipeline, so this
+# workflow needs no AI key.
 #
-# Prerequisites in the source repo:
-#   secrets.DOCS_SYNC_PAT  — Personal Access Token with workflow + contents
-#                            scope for the central docs repository
-#   secrets.AI_API_KEY     — API key for your AI provider (OpenAI or compatible)
-#
-# Variables (repository-level, optional):
-#   vars.CENTRAL_REPO      — Override central docs repo (default: org/docs-site)
-#   vars.AI_API_HOST       — Override AI API hostname (default: api.openai.com)
-#   vars.AI_MODEL          — Override AI model (default: gpt-4o)
+# Required secret: DOCS_SYNC_PAT  (contents + workflows on the CENTRAL repo)
 # ============================================================
 
-# ── Team configuration ─────────────────────────────────────
-# Customize these values for your service.
 env:
-  CENTRAL_REPO: 'your-org/your-central-docs-repo'  # ← set to your central docs repo
-  TARGET_BRANCH: 'staging'           # ← branch in the central repo to write synced docs into
-  INSTRUCTIONS_FILE: ''              # ← optional: .github/instructions/my-service.md
-  SERVICE_NAME: ''                   # ← optional: override the docs folder name (defaults to repo name)
-  TARGET_PATH: ''                    # ← optional: explicit destination path (overrides SERVICE_NAME)
-  TEMPLATES_PATH: ''                 # ← optional: service-specific templates subdirectory
+  CENTRAL_REPO: 'your-org/your-central-docs-repo'   # <- central docs repo (owner/name)
+  TARGET_BRANCH: 'staging'                          # <- branch in the central repo that receives synced docs
+  SYNC_MODE: 'docs'                                 # <- docs | code | both  (must match `mode` in the central config/repos.json)
 
 on:
   push:
-    branches:
-      - main        # ← Update to the branch(es) you want to trigger sync on
-    paths:
-      - 'docs/**'
-      - 'documentation/**'
+    branches: [main]            # <- branch(es) that should trigger a sync
+    # No `paths:` filter: in code/both mode any source change can affect a page. The central pipeline's
+    # zero-cost prefilter discards noise. For SYNC_MODE=docs the dispatch step below only fires on docs changes.
+    paths-ignore:
+      - '**.png'
+      - '**.jpg'
+      - '**.svg'
+      - '**/package-lock.json'
 
-# Cancel superseded runs on the same branch — only the latest commit dispatches.
+# Only the latest commit on a branch needs to dispatch.
 concurrency:
   group: sync-docs-${{ github.ref_name }}
   cancel-in-progress: true
 
-jobs:
-  check-and-trigger:
-    runs-on: ubuntu-latest   # Change to self-hosted if you use a private runner
+permissions:
+  contents: read
 
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      - name: Install jq
-        run: |
-          if ! command -v jq &> /dev/null; then
-            sudo apt-get update -qq && sudo apt-get install -y jq
-          fi
-
-      # ── Get changed files and diff ─────────────────────────
-      - name: Get code differences
-        id: diff
-        run: |
-          CODE_DIFF=$(git diff HEAD~1 HEAD --unified=5)
-
-          echo "code_diff<<EOF" >> $GITHUB_OUTPUT
-          echo "$CODE_DIFF" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
-          CHANGED_FILES_SPACE=$(echo "$CHANGED_FILES" | tr '\n' ' ')
-          echo "files_space=$CHANGED_FILES_SPACE" >> $GITHUB_OUTPUT
-
-      # ── AI relevance check ─────────────────────────────────
-      - name: Assess documentation relevance with AI
-        id: ai_assessment
+      - name: Collect changed documentation files
+        id: files
         env:
-          CODE_DIFF_INTERNAL: ${{ steps.diff.outputs.code_diff }}
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_API_HOST: ${{ vars.AI_API_HOST || 'api.openai.com' }}
-          AI_MODEL: ${{ vars.AI_MODEL || 'gpt-4o' }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          if [ -z "$AI_API_KEY" ]; then
-            echo "⚠️  AI_API_KEY not set — marking all doc changes as relevant"
-            echo "is_relevant=true" >> $GITHUB_OUTPUT
-            echo "summary=No AI assessment (key missing) — changes marked relevant by default" >> $GITHUB_OUTPUT
-            exit 0
+          if [ -n "$BEFORE" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            RANGE="$BEFORE"
+          else
+            RANGE="HEAD~1"
           fi
+          FILES=$(git diff --name-only "$RANGE" HEAD -- docs documentation README.md \
+            | grep -E '\.(md|mdx|txt)$' | grep -v '^\.github/' | tr '\n' ' ' || true)
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "before=$RANGE" >> "$GITHUB_OUTPUT"
+          echo "Changed docs: $FILES"
 
-          SYSTEM_PROMPT='You are a specialized documentation assistant. Analyze the git diff and determine if it represents a meaningful documentation update that should be synced to the central documentation repository.
-
-Criteria for RELEVANT changes (respond with is_relevant: true):
-- New Features: Documentation for new functionality or capabilities
-- Significant Logic Changes: Updates that affect how users interact with the system
-- Configuration Changes: New or modified configuration options, settings, or parameters
-- API Changes: Updates to APIs, endpoints, or interfaces
-
-Criteria for NON-RELEVANT changes (respond with is_relevant: false):
-- Bug Fixes: Minor corrections that do not change functionality
-- Refactoring: Internal code reorganization without user-facing changes
-- Internal Tests/CI: Changes to test files or CI/CD configurations
-- Typo Fixes: Simple spelling or grammar corrections
-
-Respond ONLY with a single JSON object. Keys: "is_relevant" (boolean), "summary" (string explaining your decision).'
-
-          JSON_PAYLOAD=$(jq -n \
-            --arg system "$SYSTEM_PROMPT" \
-            --arg diff "$CODE_DIFF_INTERNAL" \
-            --arg repo "${{ github.repository }}" \
-            --arg model "$AI_MODEL" \
-            '{
-              model: $model,
-              messages: [
-                { role: "system", content: $system },
-                { role: "user", content: ("Analyze this diff from " + $repo + ":\n\n" + $diff) }
-              ]
-            }')
-
-          AI_RESPONSE=$(curl -s -X POST \
-            -H 'accept: application/json' \
-            -H "Authorization: Bearer $AI_API_KEY" \
-            -H 'Content-Type: application/json' \
-            --data "$JSON_PAYLOAD" \
-            "https://${AI_API_HOST}/v1/chat/completions")
-
-          if [ -z "$AI_RESPONSE" ] || ! echo "$AI_RESPONSE" | jq -e '.choices' > /dev/null 2>&1; then
-            echo "⚠️  AI API call failed — marking changes as relevant by default"
-            echo "is_relevant=true" >> $GITHUB_OUTPUT
-            echo "summary=AI API call failed — changes marked relevant by default" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          AI_CONTENT=$(echo "$AI_RESPONSE" | jq -r '.choices[0].message.content // empty')
-          CLEAN_CONTENT=$(echo "$AI_CONTENT" | sed '/^```/d' | sed '/^json/d')
-
-          IS_RELEVANT=$(echo "$CLEAN_CONTENT" | jq -r '.is_relevant // "false"')
-          SUMMARY=$(echo "$CLEAN_CONTENT" | jq -r '.summary // ""' | sed 's/\"/\\"/g')
-
-          echo "is_relevant=$IS_RELEVANT" >> $GITHUB_OUTPUT
-          echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
-          echo "📊 AI assessment: is_relevant=$IS_RELEVANT"
-
-      # ── Dispatch to central docs repo ──────────────────────
-      - name: Trigger central documentation repository sync
-        if: steps.ai_assessment.outputs.is_relevant == 'true'
+      - name: Dispatch to central docs repo
+        if: steps.files.outputs.files != '' || env.SYNC_MODE != 'docs'
         env:
-          AI_SUMMARY: ${{ steps.ai_assessment.outputs.summary }}
           DOCS_SYNC_PAT: ${{ secrets.DOCS_SYNC_PAT }}
+          FILES: ${{ steps.files.outputs.files }}
+          BEFORE: ${{ steps.files.outputs.before }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
         run: |
-          if [ -z "$DOCS_SYNC_PAT" ]; then
-            echo "❌ ERROR: DOCS_SYNC_PAT secret is not set"
-            exit 1
-          fi
-
-          CENTRAL_REPO_OWNER=$(echo "$CENTRAL_REPO" | cut -d'/' -f1)
-          CENTRAL_REPO_NAME=$(echo "$CENTRAL_REPO"  | cut -d'/' -f2)
-
-          echo "📡 Dispatching to: $CENTRAL_REPO"
-
-          jq -n \
-            --arg repo "${{ github.repository }}" \
-            --arg sha  "${{ github.sha }}" \
-            --arg ref  "${{ github.ref_name }}" \
-            --arg files "${{ steps.diff.outputs.files_space }}" \
-            --arg summary "$AI_SUMMARY" \
-            --arg target_branch "$TARGET_BRANCH" \
-            --arg instructions_file "$INSTRUCTIONS_FILE" \
-            --arg service_name "$SERVICE_NAME" \
-            --arg target_path "$TARGET_PATH" \
-            --arg templates_path "$TEMPLATES_PATH" \
-            '{
-              event_type: "docs-updated",
-              client_payload: {
-                repository: $repo,
-                sha: $sha,
-                ref: $ref,
-                changed_files: $files,
-                ai_summary: $summary,
-                target_branch: $target_branch,
-                instructions_file: $instructions_file,
-                service_name: $service_name,
-                target_path: $target_path,
-                templates_path: $templates_path
-              }
-            }' > payload.json
-
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST \
+          [ -n "$DOCS_SYNC_PAT" ] || { echo "DOCS_SYNC_PAT is not set"; exit 1; }
+          BEFORE_SHA=$(git rev-parse "$BEFORE")
+          jq -n --arg repo "$REPO" --arg sha "$SHA" --arg before "$BEFORE_SHA" --arg ref "$REF" \
+                --arg files "$FILES" --arg target "$TARGET_BRANCH" \
+            '{event_type:"docs-updated", client_payload:{repository:$repo, sha:$sha, before:$before, ref:$ref, changed_files:$files, target_branch:$target}}' > payload.json
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $DOCS_SYNC_PAT" \
-            -H "Content-Type: application/json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/$CENTRAL_REPO_OWNER/$CENTRAL_REPO_NAME/dispatches" \
-            --data @payload.json)
-
-          if [ "$HTTP_CODE" = "204" ]; then
-            echo "✅ Dispatch sent successfully (HTTP 204)"
-          elif [ "$HTTP_CODE" = "404" ]; then
-            echo "❌ ERROR: Repository not found or token lacks access (HTTP 404)"
-            exit 1
-          elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
-            echo "❌ ERROR: Authentication failed (HTTP $HTTP_CODE)"
-            echo "   Ensure DOCS_SYNC_PAT has 'workflow' and 'contents' scopes."
-            exit 1
-          else
-            echo "❌ ERROR: Unexpected HTTP status: $HTTP_CODE"
-            exit 1
-          fi
-
-      # ── Job summary ────────────────────────────────────────
-      - name: Report decision
-        if: always()
-        env:
-          AI_SUMMARY: ${{ steps.ai_assessment.outputs.summary }}
-          IS_RELEVANT: ${{ steps.ai_assessment.outputs.is_relevant }}
-        run: |
-          echo "## 📋 Documentation Sync Assessment" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Source Repository** | \`${{ github.repository }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Source Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Commit SHA** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Central Docs Repo** | \`${CENTRAL_REPO}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Target Branch** | \`${TARGET_BRANCH}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          if [ "$IS_RELEVANT" == "true" ]; then
-            echo "### ✅ Sync Triggered" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Documentation changes dispatched to \`${CENTRAL_REPO}\`." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### 🚫 Sync Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Changes were determined to be non-relevant for documentation sync." >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**AI Assessment:**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "$AI_SUMMARY" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Changed Files:**" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.diff.outputs.files_space }}" | tr ' ' '\n' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+            "https://api.github.com/repos/${CENTRAL_REPO}/dispatches" --data @payload.json)
+          case "$CODE" in
+            204) echo "dispatched to $CENTRAL_REPO" ;;
+            401|403) echo "auth failed ($CODE): check DOCS_SYNC_PAT scopes"; exit 1 ;;
+            404) echo "central repo not found or token lacks access"; exit 1 ;;
+            *) echo "unexpected HTTP $CODE"; exit 1 ;;
+          esac
