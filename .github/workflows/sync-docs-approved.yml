@@ -1,0 +1,59 @@
+name: Index Approved Documentation
+
+# When a docs-sync PR is merged, a human has approved the final text. Only now does it
+# enter the vector store (keyed by commit hash) and its claims become trusted facts.
+# Closing a PR without merging leaves the index untouched, so drafts never pollute retrieval.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  index:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'docs-sync/')
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Checkout ai-multisync-tool
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TOOL_REPO || 'rubenalejandrocalderoncorona/ai-multysinc-tool' }}
+          ref: ${{ vars.TOOL_REF || 'main' }}
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          path: .multisync
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+        working-directory: .multisync
+
+      - name: Index added/changed pages; drop removed pages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL || 'https://api.openai.com' }}
+          AI_EMBED_MODEL: ${{ vars.AI_EMBED_MODEL || 'text-embedding-3-small' }}
+          AI_EMBED_DIM: ${{ vars.AI_EMBED_DIM || '1536' }}
+          QDRANT_URL: ${{ vars.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          FACTSTORE_DATABASE_URL: ${{ secrets.FACTSTORE_DATABASE_URL }}
+        run: |
+          mkdir -p /tmp/removed
+          mapfile -t CHANGED < <(git diff --name-only --diff-filter=AM "$BASE_SHA" "$MERGE_SHA" -- 'src/content/docs/services/')
+          mapfile -t REMOVED < <(git diff --name-only --diff-filter=D  "$BASE_SHA" "$MERGE_SHA" -- 'src/content/docs/services/')
+          for f in "${REMOVED[@]}"; do
+            [ -n "$f" ] || continue
+            mkdir -p "/tmp/removed/$(dirname "$f")"; git show "$BASE_SHA:$f" > "/tmp/removed/$f"
+          done
+          [ "${#CHANGED[@]}" -eq 0 ] || node .multisync/scripts/index_approved.js "${CHANGED[@]}"
+          [ "${#REMOVED[@]}" -eq 0 ] || node .multisync/scripts/index_approved.js --delete $(printf '/tmp/removed/%s ' "${REMOVED[@]}")

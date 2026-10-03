@@ -1,7 +1,7 @@
 ---
-id: default-template
 title: "[Default Template]"
-sidebar_position: 10
+sidebar:
+  order: 10
 ---
 
 # [Default Template]

@@ -1,276 +1,188 @@
 # ai-multisync-tool
 
-Automatically sync documentation from any number of service repositories into a single Docusaurus site, with AI-driven quality checks, folder classification, template selection, and language polish.
-
----
-
-## How it works
+Sync documentation from many service repositories into one **Astro Starlight** site, with an AI decision pipeline that spends tokens only when a change deserves it, verifies every draft against its source, and never publishes something it could not ground.
 
 ```
-Service Repo A  ──push docs──►  sync-docs-source.yml  ──repository_dispatch──►  sync-docs-central.yml
-Service Repo B  ──push docs──►  sync-docs-source.yml  ──repository_dispatch──►      │
-                                                                                      ▼
-                                                                          Central Docs Repo (this repo)
-                                                                          Docusaurus site built and deployed
+Service repo ──push docs──► sync-docs-source.yml ──repository_dispatch──► sync-docs-central.yml
+                                                                               │
+                                          ┌────────────────────────────────────┤ decision pipeline
+                                          ▼                                    ▼
+                                  Qdrant (retrieval)                  Postgres FactStore (claims + audit)
 ```
 
-1. A developer pushes a change to `docs/**` in a service repo.
-2. `sync-docs-source.yml` calls an AI to assess whether the change is worth syncing.
-3. If relevant, it sends a `repository_dispatch` event to the central docs repo.
-4. `sync-docs-central.yml` (running on `main`) receives the event, checks out the target branch, and runs the AI pipeline:
-   - Classifies each file into the correct subfolder (how-to-guides, features, concepts, etc.)
-   - Selects the best-matching documentation template
-   - Applies the template and language polish using documentation standards
-   - Injects frontmatter and writes files under `docs/services/<repo-name>/`
-5. Changes are committed and pushed to the target branch.
-6. Your existing deployment workflow builds and publishes the Docusaurus site.
+## The decision pipeline
 
----
+Cheap checks run first; each layer stops the run before the next, more expensive one.
 
-## Prerequisites
+| # | Layer | Cost | Stops the run when |
+|---|---|---|---|
+| 1 | **Prefilter** (`pipeline/prefilter.js`) | none | diff is below `MIN_DIFF_LINES` (`trivial_diff`), or nothing structural or fact-bearing changed (`no_structural_change`) |
+| 2 | **Cross-repo gate** (`pipeline/registry.js`) | FactStore lookup | a registered contract point is not documented by the repos that must also ship it (`cross_repo_incomplete`) |
+| 3 | **Similarity** (`pipeline/pipeline.js`) | embeddings | shape is unchanged and every chunk is ≥ `SIMILARITY_HIGH` similar to approved text → only the commit hash is re-keyed (anti-staleness) |
+| 4 | **Generate + judge loop** (`writer.js`, `critic.js`) | LLM | passes, or falls back (below) |
+| 5 | **Publish by trust level** | none | `auto` → committed and indexed; `review` → pull request for a technical writer |
 
-Before setting up, ensure you have:
+A *shape* change (heading, code block, table row, list item, function or array element added or removed) overrides high similarity, because adding one item barely moves an embedding.
 
-### 1. GitHub runner
+**Generation** uses RAG plus GAR: the model first writes a hypothetical paragraph describing the change, and its embedding retrieves matching approved chunks as terminology context. That hypothetical text is never indexed.
 
-The central workflow (`sync-docs-central.yml`) runs on `ubuntu-latest` by default. If your organization uses a self-hosted runner, change `runs-on: ubuntu-latest` to your runner label in both workflow files.
+**The critic** (role) uses an LLM-as-judge (technique) to extract claims from the draft and facts from the source, then code computes:
 
-### 2. AI API key
+- `precision` = supported claims / claims → below `PRECISION_MIN` is a hallucination (`hallucinated_claim`)
+- `recall` = covered source facts / source facts → below `RECALL_MIN` is a missing claim (`missing_claim`)
+- `style` and `quality` scores against the repo's style guide and glossary (`style_mismatch`, `judge_low_confidence`)
 
-The pipeline requires an OpenAI-compatible API. Any provider that exposes `/v1/chat/completions` works (OpenAI, Azure OpenAI, Anthropic via compatibility layer, local Ollama, etc.).
+A grounded-but-awkward draft gets one **polish-only** pass (forbidden from touching facts) and is re-scored. Otherwise the findings are fed back into the next attempt. After `MAX_ITERATIONS`, **one automatic retry** runs with `TOP_K_WIDENED` context before escalating.
 
-- **Default:** OpenAI `gpt-4o` at `api.openai.com`
-- **Override:** Set the `AI_API_HOST`, `AI_API_PATH`, and `AI_MODEL` variables in your central repo
+### Two modes
 
-You will need a valid API key with access to your chosen model.
+| `mode` in `config/repos.json` | Source of truth | Typical repo |
+|---|---|---|
+| `docs` (default) | changed files under `docs/`, `documentation/`, or the root `README.md` | repos that already keep docs |
+| `code` | the source code itself; the pipeline drafts and updates declared pages | repos with little or no docs |
+| `both` | both of the above | |
 
-### 3. Personal Access Token (PAT)
+In `code` mode each repo declares the pages it wants and which files document them. A commit only regenerates the pages whose files changed; tests, lockfiles, vendored and generated files are never read, and lines that look like secrets are scrubbed before anything reaches a model or a log.
 
-Create a GitHub PAT (classic) or a fine-grained token with the following permissions on the **central docs repo**:
+```json
+"rubenalejandrocalderoncorona/rurag": {
+  "mode": "code",
+  "style": "README / project overview",
+  "pages": [
+    { "path": "overview.md", "kind": "Portfolio case study", "scope": ["**"] },
+    { "path": "api.md", "kind": "API documentation", "scope": ["src/routes/**", "openapi.yaml"] }
+  ]
+}
+```
 
-| Permission | Why |
+In code mode the similarity stage embeds the GAR paragraph (what the docs would say about this change) and compares it with what the page already says, because code and prose are not comparable. The judge then checks every claim against the code (`prompts/judge-code.md`). A first run, or `full: true` on a manual dispatch, documents everything in scope.
+
+### Prompts and styles
+
+All LLM instructions are files in `prompts/` (see `prompts/README.md`); each run logs the prompt version as `name@hash`. Writer personas and judge rubrics are a key-value library, `config/doc-styles.json`:
+
+```json
+"API documentation": {
+  "prompt": "You are a backend developer writing API documentation for engineers who will integrate with this service. ...",
+  "rubric": ["Each endpoint lists method/path, parameters with types and errors", "..."]
+}
+```
+
+The key is chosen per repo (`style`) or per page (`kind`). `prompt` becomes the writer persona; `rubric` is what the judge scores `style` against. Bundled keys: API documentation, README / project overview, Architecture overview, How-to guide, Runbook / SOP, Configuration reference, Troubleshooting, Tutorial, Release notes, Portfolio case study, Data and schema reference. Add keys freely.
+
+### LangGraph stages and logging
+
+The cascade is a LangGraph `StateGraph` (`pipeline/pipeline.js`). Nodes: `prefilter` → `cross_repo` → `similarity` → `gar` → `write_draft` → `judge` → (`polish_draft` | `widen`) → `publish` or `fallback`.
+
+Every node execution is logged with its status, duration and decision data (for example `minChunkSimilarity`, `precision`, `topK`):
+
+- to the runner log, one line per node;
+- to the FactStore `node_logs` table (queryable per `run_id`);
+- in the returned decision as `trail`, and in `pipeline-results.json` as `stages`;
+- optionally to LangSmith by setting `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` (LangGraph's native tracing; runs are named `docs-sync-decision`).
+
+```sql
+SELECT node, status, ms, note FROM node_logs WHERE run_id = '<run>' ORDER BY id;
+```
+
+### Fallback (never auto-publishes)
+
+A failed run records `reviewer_action = auto_rejected` with a `root_cause_tag` (`iteration_cap_exceeded`, `cross_repo_incomplete`, `pipeline_error`; the per-attempt check that failed, e.g. `hallucinated_claim`, is in the attempt table), opens a ticket in **cAImanDesk** (default; GitHub Issues and Jira are alternatives) with the draft, attempt table and failed checks, posts to Slack if configured, and uploads the rejected draft as a workflow artifact. No page is written. `FactStore.rootCauseBacklog(repo)` shows which causes repeat per repo.
+
+### The index only holds approved text
+
+| Path | When the vector store is written |
 |---|---|
-| `contents: write` | Commit and push synced documentation |
-| `workflows: write` | Trigger and update workflow runs (`repository_dispatch`) |
+| `trust: auto` | immediately after publish |
+| `trust: review` | **only when the PR is merged** (`sync-docs-approved.yml`), keyed by commit hash |
+| draft, rejected, GAR text | never |
 
-> **Fine-grained tokens:** Set the token on the central docs repo with Read/Write access to Contents and Workflows. Then add it as a secret named `DOCS_SYNC_PAT` in **every source service repo** that will dispatch to the central repo.
+### Ticketing (cAImanDesk)
 
-### 4. Node.js 18+
+`https://tickets.caimanlabs.com.mx` is a Vikunja v2 deployment, so tickets are created through its REST API: `PUT /api/v1/projects/{id}/tasks` with a Bearer API token. Set `CAIMANDESK_API_TOKEN` (an API token allowed to create tasks) and `CAIMANDESK_PROJECT_ID`. A repeat failure for the same repo, file and root cause adds a comment to the open task instead of creating a duplicate. Ticket creation never blocks or fails a run.
 
-Required to run scripts locally or in CI. The workflow uses `actions/setup-node@v4` with Node 18.
+## Demo
 
----
+```bash
+npm run demo:offline     # rehearsal: scripted LLM, in-memory stores, no keys needed
+npm run demo             # live: real LLM + embeddings, Qdrant, Postgres, cAImanDesk
+```
+
+Five scenarios, each printing its stage trail: first publish, near-duplicate (cosine short-circuit, no LLM), structural change (overrides similarity), cross-repo block (fallback + ticket, no LLM), and judge fallback (precision forced above 1.0, so the loop widens and escalates + ticket). The live demo needs the variables in `.env.example`; `SIMILARITY_HIGH` defaults to 0.85 there and must be calibrated against real embeddings.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `pipeline/` | the decision pipeline (config, llm, structure, prefilter, vectorstore, factstore, registry, writer, critic, fallback) |
+| `scripts/` | CLI entry points: `run_pipeline.js`, `index_approved.js`, `healthcheck.js`, `generate-summary.js`, `demo.js` |
+| `config/repos.json` | per-repo trust level, docs folder, style guide, glossary |
+| `config/feature-registry.json` | contract-point symbol → repos that must also ship |
+| `infra/` | docker-compose stack (VPS) and k8s kustomize base |
+| `.github/workflows/` | source, central, and post-approval workflows |
+| `test/` | unit tests with a scripted LLM (no network) |
+
+## What you still need to provide
+
+See [docs/SETUP-REQUIRED.md](docs/SETUP-REQUIRED.md): infrastructure diagram with what is missing, every credential and where to get it, and the order of operations. `node scripts/doctor.js` checks them.
 
 ## Quick start
 
-### Step 1 — Set up the central docs repo
-
-Clone or fork this repository, then configure it as your central docs site.
+### 1. Run the tests (no services needed)
 
 ```bash
-# Clone the tool
-git clone https://github.com/your-org/ai-multisync-tool.git my-docs-site
-cd my-docs-site
-
-# Install dependencies
-make install
-
-# Preview locally
-make start
+make install && make test
 ```
 
-Edit `docusaurus.config.js` to set your site URL, organization name, and project name.
-
-### Step 2 — Add the central workflow
-
-The file `.github/workflows/sync-docs-central.yml` must be committed to the **`main` branch** of your central docs repo. GitHub `repository_dispatch` events are only received by workflows on the default branch.
+### 2. Stand up the vector DB and FactStore on the VPS
 
 ```bash
-git add .github/workflows/sync-docs-central.yml
-git commit -m "chore: add documentation sync central workflow"
-git push origin main
+cp .env.example .env        # set QDRANT_API_KEY and FACTSTORE_PASSWORD
+make stack-up
+make stack-check            # creates the Qdrant collection and FactStore schema
 ```
 
-### Step 3 — Add secrets and variables to the central repo
+Ports bind to `127.0.0.1`. Do **not** publish Postgres. Pick one way for CI to reach the stack:
 
-In your central docs repo settings (`Settings → Secrets and variables → Actions`):
+1. **Self-hosted GitHub runner on the VPS** (recommended): set repo variable `RUNNER_LABEL` to its label; `QDRANT_URL=http://localhost:6333`.
+2. **WireGuard/Tailscale** between the VPS and your runner.
+3. **`--profile edge`** for an HTTPS + API-key front on Qdrant only (Postgres still needs option 1 or 2).
 
-**Secrets (required):**
+`AI_EMBED_DIM` must match the embedding model (1536 for `text-embedding-3-small`). Changing the model means a new collection.
 
-| Name | Value |
+### 3. Configure the central docs repo
+
+Commit `sync-docs-central.yml` and `sync-docs-approved.yml` to its **default branch**, then set:
+
+| Kind | Name |
 |---|---|
-| `DOCS_SYNC_PAT` | GitHub PAT with `contents:write` and `workflows:write` on this repo |
-| `AI_API_KEY` | Your AI provider API key |
+| secret | `DOCS_SYNC_PAT`, `AI_API_KEY`, `QDRANT_API_KEY`, `FACTSTORE_DATABASE_URL` |
+| variable | `QDRANT_URL` |
+| optional | `RUNNER_LABEL`, `AI_API_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL`, `AI_EMBED_MODEL`, `AI_EMBED_DIM`, `TICKET_PROVIDER`, `SLACK_WEBHOOK_URL`, `JIRA_*` |
 
-**Variables (optional — override defaults):**
+Any OpenAI-compatible server works (OpenAI, vLLM, Ollama via `AI_API_BASE_URL=http://host:11434`).
 
-| Name | Default | Description |
-|---|---|---|
-| `AI_API_HOST` | `api.openai.com` | AI API hostname |
-| `AI_API_PATH` | `/v1/chat/completions` | AI API path |
-| `AI_MODEL` | `gpt-4o` | Model name |
-| `GITHUB_HOST` | `github.com` | Override for GitHub Enterprise |
+### 4. Register each service repo
 
-### Step 4 — Add the source workflow to each service repo
+Add it to `config/repos.json` (start with `trust: review`), copy `sync-docs-source.yml` into the service repo, set `CENTRAL_REPO`, `TARGET_BRANCH`, and add `DOCS_SYNC_PAT`. The source workflow needs no AI key.
 
-Copy `.github/workflows/sync-docs-source.yml` into any service repository that should sync its docs.
+## Moving to Kubernetes
 
-```bash
-# From within the service repo
-cp /path/to/ai-multisync-tool/.github/workflows/sync-docs-source.yml \
-   .github/workflows/sync-docs.yml
-```
+`infra/k8s/` mirrors the compose stack: StatefulSets with PVCs, probes taken from the compose healthchecks, a `multisync-migrate` Job, and a Secret template. Everything is configured by environment variables, so the same `Dockerfile.pipeline` image runs as a Job or CronJob. Check it with `make k8s-render`.
 
-Open `.github/workflows/sync-docs.yml` and configure the top-level `env` block:
+## Tuning
 
-```yaml
-env:
-  CENTRAL_REPO: 'your-org/your-central-docs-repo'  # ← required
-  TARGET_BRANCH: 'staging'    # ← branch in the central repo to write into
-  INSTRUCTIONS_FILE: ''       # ← optional: path to custom instructions file
-  SERVICE_NAME: ''            # ← optional: override docs folder name
-  TARGET_PATH: ''             # ← optional: explicit destination path
-  TEMPLATES_PATH: ''          # ← optional: service-specific templates dir
-```
+Thresholds are environment variables (`MIN_DIFF_LINES`, `SIMILARITY_HIGH`, `PRECISION_MIN`, `RECALL_MIN`, `STYLE_MIN`, `JUDGE_MIN`, `MAX_ITERATIONS`, `TOP_K`, `TOP_K_WIDENED`); defaults are in `.env.example`. Start strict on precision, and loosen recall or style only after reading the fallback backlog.
 
-Add the `DOCS_SYNC_PAT` secret to the source service repo as well.
+## Security notes
 
-Commit and push — the workflow triggers on any push to `docs/**` or `documentation/**` paths.
+- Dispatch fields are read through `env`, never interpolated into shell, and validated before use.
+- The central workflow refuses to write to `main` or `master`.
+- Pipeline code is always taken from the default branch, not from the target branch.
+- Infrastructure errors fail safe (`pipeline_error` fallback), never publish.
 
-### Step 5 — Configure the target branch protection (recommended)
+## Known limits
 
-Never sync directly to `main`. The central workflow refuses to write to `main` or `master` by design. Use a staging branch:
-
-1. Create a `staging` branch (or any branch name — set it as `TARGET_BRANCH` in step 4).
-2. Open pull requests from `staging` → `main` after reviewing synced content.
-3. Your existing deploy workflow builds the Docusaurus site on merge to `main`.
-
----
-
-## Customizing documentation standards
-
-The file `.github/instructions/DocumentationInstructions.instructions.md` controls all AI behavior:
-
-- **Formatting rules** — heading structure, code block style, callout format
-- **Handling missing content** — whether to delete empty template sections or fill them with placeholders
-- **Folder structure** — the `## Folder Structure` section tells the AI which subfolder to place each file in
-
-Edit this file to match your team's documentation standards. No code changes are required.
-
-### Per-service instructions
-
-To use different standards for a specific service, create a file like `.github/instructions/my-service.md` in the **central docs repo** and set `INSTRUCTIONS_FILE: '.github/instructions/my-service.md'` in that service's source workflow.
-
----
-
-## Adding templates
-
-Templates are stored in `docs/templates/`. Each template is a Markdown file. The AI reads all template files, picks the best match for each document, and restructures the content accordingly.
-
-To add a template:
-1. Create `docs/templates/my-template/my-template.md`
-2. Write your template with section headings
-3. The AI will automatically consider it for future syncs — no code changes needed
-
----
-
-## Deploying to GitHub Pages
-
-```bash
-# Build the site
-make build
-
-# Deploy to GitHub Pages (uses GIT_USER and GITHUB_TOKEN env vars)
-GIT_USER=your-github-username make deploy
-```
-
-Or trigger deployment through your existing CI workflow on merge to `main`.
-
----
-
-## Repository structure
-
-```
-.
-├── .github/
-│   ├── instructions/
-│   │   └── DocumentationInstructions.instructions.md  # AI documentation standards
-│   └── workflows/
-│       ├── sync-docs-central.yml   # Lives on main branch of the central docs repo
-│       └── sync-docs-source.yml    # Copy this into each source service repo
-├── docs/
-│   ├── services/                   # Auto-synced docs land here (one dir per service)
-│   └── templates/                  # Documentation templates for AI template selection
-│       ├── default-template/
-│       ├── sop-template/
-│       └── technical-concept-template/
-├── scripts/
-│   ├── analyze_docs.js             # AI: decide which files to sync and classify folders
-│   ├── sync_docs.js                # AI: template selection, polish, frontmatter injection
-│   ├── update_sidebar.js           # Update sidebar.js after sync
-│   └── generate-summary.js         # Generate GitHub Actions step summary
-├── docusaurus.config.js            # Docusaurus site configuration
-├── sidebars.js                     # Sidebar configuration (autogenerated by default)
-├── package.json
-└── Makefile                        # Helper targets for setup and deployment
-```
-
----
-
-## Environment variables reference
-
-### Central workflow (`sync-docs-central.yml`)
-
-All configured via GitHub repository secrets and variables.
-
-| Variable | Source | Description |
-|---|---|---|
-| `DOCS_SYNC_PAT` | Secret | PAT for checkout and push |
-| `AI_API_KEY` | Secret | AI provider API key |
-| `AI_API_HOST` | Variable | AI API hostname (default: `api.openai.com`) |
-| `AI_API_PATH` | Variable | AI API path (default: `/v1/chat/completions`) |
-| `AI_MODEL` | Variable | Model name (default: `gpt-4o`) |
-| `GITHUB_HOST` | Variable | GitHub hostname (default: `github.com`, override for GHE) |
-
-### Source workflow (`sync-docs-source.yml`)
-
-Configured in the `env` block at the top of the workflow file.
-
-| Variable | Description |
-|---|---|
-| `CENTRAL_REPO` | Full name of the central docs repo (`org/repo`) |
-| `TARGET_BRANCH` | Branch in the central repo to write synced docs into |
-| `INSTRUCTIONS_FILE` | Path to custom instructions file in the central repo |
-| `SERVICE_NAME` | Override the service folder name (defaults to repo name) |
-| `TARGET_PATH` | Explicit destination path (overrides `SERVICE_NAME`) |
-| `TEMPLATES_PATH` | Service-specific templates directory in the central repo |
-
----
-
-## Troubleshooting
-
-**Workflow not triggered after push**
-- Confirm the source workflow listens to the correct branch and paths.
-- Check that `DOCS_SYNC_PAT` has `workflows:write` permission.
-
-**`repository_dispatch` not received by central workflow**
-- `sync-docs-central.yml` must be on the **`main` branch** of the central repo.
-- Verify the PAT has `contents:write` and `workflows:write` on the central repo.
-
-**AI returns empty or malformed responses**
-- Check `AI_API_KEY` is correctly set as a secret.
-- Verify `AI_API_HOST` and `AI_MODEL` match your provider's values.
-- For Azure OpenAI, set `AI_API_PATH` to `/openai/deployments/YOUR_DEPLOYMENT/chat/completions?api-version=2024-02-01`.
-
-**Template boilerplate appearing in output**
-- Check that `DocumentationInstructions.instructions.md` contains the "Handling Missing Content" section.
-- Ensure the file is committed to the branch the workflow runs on.
-
-**Branch safety error: `FATAL: Refusing to sync directly to main`**
-- Set `TARGET_BRANCH` to a non-protected branch (e.g. `staging`).
-
----
-
-## License
-
-MIT
+- Structural analysis is a lexical signature, not a parser: it is language-agnostic but approximate.
+- Code mode reads a size-capped snapshot (60k characters, 12k per file) of each page's scoped files; very large repos need narrow `scope` globs per page.
+- The Qdrant REST adapter and Postgres FactStore have been tested only through in-memory twins and request-shape review, not against live services in this repo's CI.

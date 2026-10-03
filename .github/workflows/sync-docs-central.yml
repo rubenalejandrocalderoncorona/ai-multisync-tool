@@ -1,21 +1,21 @@
 name: Sync Documentation
 
 # ============================================================
-# LISTENER ON MAIN, WORKER ON ANY TARGET BRANCH
-# ============================================================
-# This workflow MUST live on the 'main' branch of your central docs repo
-# to receive repository_dispatch events from source service repos.
+# CENTRAL WORKFLOW — lives on the default branch of the central docs repo
+# (repository_dispatch is only delivered to workflows on the default branch).
 #
-# All file work (checkout, sync, push) happens on the TARGET BRANCH
-# resolved at runtime — no branch name is hardcoded here.
+# Pipeline: cheap zero-LLM checks -> similarity -> GAR/RAG draft -> LLM-as-judge loop.
+#   published       trust=auto   committed straight to TARGET_BRANCH, indexed immediately
+#   pending_review  trust=review opened as a PR for the technical writer; indexed only after merge
+#   fallback        never published: ticket + Slack alert, draft kept as a workflow artifact
 #
-# Routing table (first match wins):
-#   repository_dispatch  →  client_payload.target_branch
-#   workflow_dispatch    →  inputs.target_branch
-#
-# Deployment:
-#   If you have a deploy workflow (e.g. deploy.yml), trigger it on push
-#   to your desired branch (e.g. 'main' or 'staging').
+# Required secrets: DOCS_SYNC_PAT, AI_API_KEY, QDRANT_API_KEY, FACTSTORE_DATABASE_URL, CAIMANDESK_API_TOKEN
+# Required variables: QDRANT_URL, CAIMANDESK_PROJECT_ID
+# Tool pin: TOOL_REPO (default rubenalejandrocalderoncorona/ai-multysinc-tool), TOOL_REF (default main)
+# Optional variables: RUNNER_LABEL (e.g. a self-hosted runner on the VPS that can reach
+#   Postgres), AI_API_BASE_URL, AI_MODEL, AI_FAST_MODEL, AI_EMBED_MODEL, AI_EMBED_DIM,
+#   TICKET_PROVIDER, GITHUB_HOST
+# Optional secrets: SLACK_WEBHOOK_URL, JIRA_*
 # ============================================================
 
 on:
@@ -24,280 +24,186 @@ on:
   workflow_dispatch:
     inputs:
       source_repo:
-        description: 'Source repository (e.g., your-org/your-service)'
+        description: 'Source repository (org/repo)'
         required: true
-        default: ''
       source_ref:
-        description: 'Source branch/commit/SHA to sync from'
+        description: 'Source commit SHA or ref to sync from'
         required: true
-        default: ''
       target_branch:
         description: 'Branch in this repo to write synced docs into'
         required: true
-        default: 'main'
+        default: 'staging'
       target_file:
-        description: 'Specific file to sync (e.g. docs/my-guide.md). Leave blank for all changed files.'
+        description: 'Single file to sync (blank = all docs in the repo)'
         required: false
         default: ''
-      instructions_file:
-        description: 'Custom instructions file path (e.g. .github/instructions/my-service.md). Leave blank for default.'
+      full:
+        description: 'Code mode: regenerate every declared page from the whole repo, not just this commit'
         required: false
-        default: ''
+        type: boolean
+        default: false
 
-# One run per target branch at a time — queues rather than cancels, so no
-# dispatch is dropped when two source repos sync concurrently.
+# One run per target branch at a time: queue, never cancel, so no dispatch is dropped.
 concurrency:
   group: sync-docs-${{ github.event.client_payload.target_branch || github.event.inputs.target_branch }}
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
 jobs:
   sync-docs:
-    runs-on: ubuntu-latest   # Change to self-hosted if you use a private runner
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    env:
+      # Untrusted dispatch fields are only ever read through env, never interpolated into shell.
+      SOURCE_REPO: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
+      SOURCE_SHA_IN: ${{ github.event.client_payload.sha || github.event.inputs.source_ref }}
+      SOURCE_BEFORE: ${{ github.event.client_payload.before || '' }}
+      TARGET_BRANCH: ${{ github.event.client_payload.target_branch || github.event.inputs.target_branch }}
+      PAYLOAD_FILES: ${{ github.event.client_payload.changed_files || '' }}
+      TARGET_FILE: ${{ github.event.inputs.target_file || '' }}
+      GH_TOKEN: ${{ secrets.DOCS_SYNC_PAT }}
 
     steps:
-      # ============================================================
-      # CHECKOUT: Central Repository (THIS REPO)
-      # ============================================================
-      - name: Checkout documentation repository
+      - name: Validate inputs
+        run: |
+          [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "invalid source repo"; exit 1; }
+          [[ "$SOURCE_SHA_IN" =~ ^[A-Za-z0-9_./-]+$ ]]               || { echo "invalid source ref"; exit 1; }
+          [[ "$TARGET_BRANCH" =~ ^[A-Za-z0-9_./-]+$ ]]               || { echo "invalid target branch"; exit 1; }
+          case "$TARGET_BRANCH" in main|master) echo "refusing to write directly to $TARGET_BRANCH"; exit 1;; esac
+
+      - name: Checkout this docs repo (default branch, for config and the site)
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.DOCS_SYNC_PAT }}
-          ref: main
-          persist-credentials: true
+          ref: ${{ github.event.repository.default_branch }}
 
-      - name: Resolve target branch
-        id: target_branch
-        run: |
-          if [ -n "${{ github.event.client_payload.target_branch }}" ]; then
-            TARGET_BRANCH="${{ github.event.client_payload.target_branch }}"
-          elif [ -n "${{ github.event.inputs.target_branch }}" ]; then
-            TARGET_BRANCH="${{ github.event.inputs.target_branch }}"
-          else
-            echo "❌ ERROR: target_branch was not provided."
-            exit 1
-          fi
-          echo "target_branch=$TARGET_BRANCH" >> $GITHUB_OUTPUT
-          echo "📌 Target branch: $TARGET_BRANCH"
-
-      - name: Resolve instructions file
-        id: instructions_file
-        run: |
-          if [ -n "${{ github.event.client_payload.instructions_file }}" ]; then
-            INSTRUCTIONS_FILE="${{ github.event.client_payload.instructions_file }}"
-          elif [ -n "${{ github.event.inputs.instructions_file }}" ]; then
-            INSTRUCTIONS_FILE="${{ github.event.inputs.instructions_file }}"
-          else
-            INSTRUCTIONS_FILE=""
-          fi
-          echo "instructions_file=$INSTRUCTIONS_FILE" >> $GITHUB_OUTPUT
-
-      # ============================================================
-      # PRESERVE SCRIPTS FROM MAIN
-      # ============================================================
-      # The workflow file lives on main (required for repository_dispatch).
-      # After switching to the target branch, scripts/ reflects that branch
-      # not main. Copy scripts to a temp location before the branch switch
-      # so the runner always uses the latest main versions.
-      - name: Preserve scripts from main
-        run: cp -r scripts/ /tmp/aimultisync-scripts/
+      # The pipeline code lives in the tool repo and is pinned by ref; this repo only holds config + content.
+      - name: Checkout ai-multisync-tool
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TOOL_REPO || 'rubenalejandrocalderoncorona/ai-multysinc-tool' }}
+          ref: ${{ vars.TOOL_REF || 'main' }}
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          path: .multisync
 
       - name: Switch to target branch
-        run: |
-          TARGET_BRANCH="${{ steps.target_branch.outputs.target_branch }}"
-          git fetch origin "${TARGET_BRANCH}:${TARGET_BRANCH}" 2>/dev/null || \
-            git checkout -b "${TARGET_BRANCH}"
-          git checkout "${TARGET_BRANCH}"
+        run: git fetch origin "$TARGET_BRANCH" 2>/dev/null && git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
 
-      - name: Restore scripts from main
-        run: cp -r /tmp/aimultisync-scripts/. scripts/
-
-      # ============================================================
-      # SAFETY GUARD: never write to main/master directly
-      # ============================================================
-      - name: Verify branch safety
-        run: |
-          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          if [[ "$CURRENT_BRANCH" == "main" ]] || [[ "$CURRENT_BRANCH" == "master" ]]; then
-            echo "❌ FATAL: Refusing to sync directly to $CURRENT_BRANCH."
-            echo "   Set TARGET_BRANCH to a non-protected branch (e.g. 'staging' or 'docs/incoming')."
-            exit 1
-          fi
-          echo "✅ Branch safety check passed: $CURRENT_BRANCH"
-
-      # ============================================================
-      # DETERMINE SOURCE REF
-      # ============================================================
-      - name: Determine source repository ref
-        id: source_ref
-        run: |
-          if [ -n "${{ github.event.client_payload.sha }}" ]; then
-            SOURCE_REF="${{ github.event.client_payload.sha }}"
-          elif [ -n "${{ github.event.client_payload.ref }}" ]; then
-            SOURCE_REF="${{ github.event.client_payload.ref }}"
-          elif [ -n "${{ github.event.inputs.source_ref }}" ]; then
-            SOURCE_REF="${{ github.event.inputs.source_ref }}"
-          else
-            echo "❌ ERROR: source_ref was not provided."
-            exit 1
-          fi
-          echo "source_ref=$SOURCE_REF" >> $GITHUB_OUTPUT
-          echo "✅ Source ref: $SOURCE_REF"
-
-      # ============================================================
-      # CHECKOUT: Source Service Repository
-      # ============================================================
       - name: Checkout source repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
-          ref: ${{ steps.source_ref.outputs.source_ref }}
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_SHA_IN }}
           token: ${{ secrets.DOCS_SYNC_PAT }}
           path: source-repo
           fetch-depth: 0
 
-      # ============================================================
-      # NODE.JS SETUP
-      # ============================================================
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '22'
 
-      # ============================================================
-      # GET CHANGED FILES
-      # ============================================================
-      - name: Get changed documentation files
-        id: changed-files
+      - name: Install pipeline dependencies
+        working-directory: .multisync
+        run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+
+      - name: Resolve changed documentation files
+        id: files
         working-directory: source-repo
         run: |
-          DOC_PATHS="docs documentation"
-          CHANGED_FILES=""
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TARGET_FILE="${{ github.event.inputs.target_file }}"
-            if [ -n "$TARGET_FILE" ]; then
-              echo "🎯 Single-file sync: $TARGET_FILE"
-              if [ -f "$TARGET_FILE" ]; then
-                CHANGED_FILES="$TARGET_FILE"
-              else
-                echo "❌ ERROR: '$TARGET_FILE' not found in source repo."
-                exit 1
-              fi
-            else
-              for doc_path in $DOC_PATHS; do
-                if [ -d "$doc_path" ]; then
-                  FILES=$(find "$doc_path" -name "*.md" -o -name "*.mdx" 2>/dev/null)
-                  [ -n "$FILES" ] && CHANGED_FILES="$CHANGED_FILES $FILES"
-                fi
-              done
-            fi
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          if [ -n "$TARGET_FILE" ]; then
+            [ -f "$TARGET_FILE" ] || { echo "'$TARGET_FILE' not found"; exit 1; }
+            LIST="$TARGET_FILE"
+          elif [ -n "$PAYLOAD_FILES" ]; then
+            LIST=$(echo "$PAYLOAD_FILES" | tr ' ' '\n')
+          elif [ -n "$SOURCE_BEFORE" ] && git cat-file -e "$SOURCE_BEFORE" 2>/dev/null; then
+            LIST=$(git diff --name-only "$SOURCE_BEFORE" "$SHA" -- docs documentation README.md)
           else
-            if [ -n "${{ github.event.client_payload.changed_files }}" ]; then
-              CHANGED_FILES="${{ github.event.client_payload.changed_files }}"
-            else
-              for doc_path in $DOC_PATHS; do
-                FILES=$(git diff --name-only HEAD~1 HEAD -- "$doc_path/" 2>/dev/null)
-                [ -n "$FILES" ] && CHANGED_FILES="$CHANGED_FILES $FILES"
-              done
-            fi
+            LIST=$(git ls-files docs documentation README.md | grep -E '\.(md|mdx)$' || true)
           fi
+          # Only markdown under docs/ or documentation/, never workflow files, no path traversal.
+          LIST=$(echo "$LIST" | sed '/^$/d' | grep -E '^((docs|documentation)/.*\.(md|mdx|txt)|README\.md)$' | grep -v '\.\.' | sort -u || true)
+          { echo "list<<EOF"; echo "$LIST"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          echo "Changed docs:"; echo "$LIST"
 
-          # Filter out .github/ paths — workflow files must never be synced as docs
-          CHANGED_FILES_OUTPUT=$(echo "$CHANGED_FILES" | tr ' ' '\n' | sed '/^$/d' | grep -v '^\.github/' | sort -u)
-
-          echo "files<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES_OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          echo "📋 Changed files:"
-          echo "$CHANGED_FILES_OUTPUT"
-
-      # ============================================================
-      # AI ANALYSIS
-      # ============================================================
-      - name: Run AI Analysis
+      - name: Run decision pipeline
         env:
-          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
-          AI_SUMMARY: ${{ github.event.client_payload.ai_summary }}
+          CHANGED_FILES: ${{ steps.files.outputs.list }}
+          SOURCE_SHA: ${{ steps.files.outputs.sha }}
           INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_API_HOST: ${{ vars.AI_API_HOST || 'api.openai.com' }}
+          AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL || 'https://api.openai.com' }}
           AI_API_PATH: ${{ vars.AI_API_PATH || '/v1/chat/completions' }}
           AI_MODEL: ${{ vars.AI_MODEL || 'gpt-4o' }}
-          SOURCE_REF: ${{ steps.source_ref.outputs.source_ref }}
-          INSTRUCTIONS_FILE: ${{ steps.instructions_file.outputs.instructions_file }}
-        run: node scripts/analyze_docs.js
-
-      # ============================================================
-      # SYNC FILES
-      # ============================================================
-      - name: Sync Documentation Files
-        env:
-          SOURCE_REPO: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
-          SOURCE_REF: ${{ steps.source_ref.outputs.source_ref }}
-          SOURCE_SHA: ${{ github.event.client_payload.sha || '' }}
-          INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_API_HOST: ${{ vars.AI_API_HOST || 'api.openai.com' }}
-          AI_API_PATH: ${{ vars.AI_API_PATH || '/v1/chat/completions' }}
-          AI_MODEL: ${{ vars.AI_MODEL || 'gpt-4o' }}
-          BRANCH_NAME: ${{ github.event.client_payload.ref || github.event.inputs.source_ref }}
-          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
-          INSTRUCTIONS_FILE: ${{ steps.instructions_file.outputs.instructions_file }}
-          SERVICE_NAME: ${{ github.event.client_payload.service_name || '' }}
-          TARGET_PATH: ${{ github.event.client_payload.target_path || '' }}
-          TEMPLATES_PATH: ${{ github.event.client_payload.templates_path || '' }}
+          AI_FAST_MODEL: ${{ vars.AI_FAST_MODEL || 'gpt-4o-mini' }}
+          AI_EMBED_MODEL: ${{ vars.AI_EMBED_MODEL || 'text-embedding-3-small' }}
+          AI_EMBED_DIM: ${{ vars.AI_EMBED_DIM || '1536' }}
+          QDRANT_URL: ${{ vars.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          FACTSTORE_DATABASE_URL: ${{ secrets.FACTSTORE_DATABASE_URL }}
+          TICKET_PROVIDER: ${{ vars.TICKET_PROVIDER || 'caimandesk' }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ vars.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
+          GITHUB_TOKEN: ${{ secrets.DOCS_SYNC_PAT }}
           GITHUB_HOST: ${{ vars.GITHUB_HOST || 'github.com' }}
-        run: |
-          if [ -z "$SOURCE_SHA" ]; then
-            SOURCE_SHA=$(git -C source-repo rev-parse HEAD)
-          fi
-          node scripts/sync_docs.js
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          FULL_SYNC: ${{ github.event.inputs.full == 'true' && '1' || '' }}
+          DOC_STYLES: ${{ github.workspace }}/config/doc-styles.json
+          PROMPTS_DIR: ${{ hashFiles('prompts/judge-docs.md') != '' && format('{0}/prompts', github.workspace) || '' }}
+          # Config comes from THIS repo; tool defaults are the fallback.
+          REPOS_CONFIG: ${{ github.workspace }}/config/repos.json
+          FEATURE_REGISTRY: ${{ github.workspace }}/config/feature-registry.json
+          INSTRUCTIONS_FILE: ${{ github.workspace }}/.multisync/.github/instructions/DocumentationInstructions.instructions.md
+          TEMPLATES_PATH: ${{ github.workspace }}/.multisync/docs/templates
+          CAIMANDESK_URL: ${{ vars.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx' }}
+          CAIMANDESK_API_TOKEN: ${{ secrets.CAIMANDESK_API_TOKEN }}
+          CAIMANDESK_PROJECT_ID: ${{ vars.CAIMANDESK_PROJECT_ID }}
+        run: node .multisync/scripts/run_pipeline.js
 
-      # ============================================================
-      # UPDATE SIDEBAR
-      # ============================================================
-      - name: Update Sidebar
-        run: node scripts/update_sidebar.js
-
-      # ============================================================
-      # COMMIT AND PUSH
-      # ============================================================
-      - name: Commit and push changes
+      - name: Commit published docs (auto-trust) to target branch
         run: |
           git config user.name "Documentation Bot"
-          git config user.email "docs-bot@noreply.github.com"
-
-          git add docs/services/ || true
-          git add "docs/services/*/sidebar.js" || true
-
-          if git diff --staged --quiet; then
-            echo "ℹ️  No changes to commit"
-          else
-            REPO_NAME=$(echo "${{ github.event.client_payload.repository || github.event.inputs.source_repo }}" | cut -d'/' -f2)
-            SOURCE_REF="${{ steps.source_ref.outputs.source_ref }}"
-            SOURCE_SHA="${{ github.event.client_payload.sha || 'manual trigger' }}"
-
-            git commit -m "docs: auto-sync from ${REPO_NAME}
-
-          Source: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
-          Ref: ${SOURCE_REF}
-          Commit: ${SOURCE_SHA}
-          Target: ${{ steps.target_branch.outputs.target_branch }}
-          Synced: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-
-            TARGET_BRANCH="${{ steps.target_branch.outputs.target_branch }}"
-            git push origin "${TARGET_BRANCH}"
-            echo "✅ Pushed to ${TARGET_BRANCH}"
+          git config user.email "docs-bot@users.noreply.github.com"
+          mapfile -t PUB < <(jq -r '.results[] | select(.outcome=="published" and .action!="none") | .targetPath' pipeline-results.json)
+          if [ "${#PUB[@]}" -gt 0 ]; then
+            git add -A -- "${PUB[@]}"
+            git diff --staged --quiet || git commit -m "docs: auto-sync from ${SOURCE_REPO}" -m "Source commit: ${{ steps.files.outputs.sha }}"
+            git push origin "HEAD:${TARGET_BRANCH}"
           fi
 
-      # ============================================================
-      # JOB SUMMARY
-      # ============================================================
-      - name: Generate Job Summary
+      - name: Open review PR (review-trust)
+        run: |
+          mapfile -t REV < <(jq -r '.results[] | select(.outcome=="pending_review" and .action!="none") | .targetPath' pipeline-results.json)
+          [ "${#REV[@]}" -gt 0 ] || { echo "nothing needs review"; exit 0; }
+          SHORT=$(echo "${{ steps.files.outputs.sha }}" | cut -c1-7)
+          BR="docs-sync/$(echo "$SOURCE_REPO" | tr '/' '-')-$SHORT"
+          git checkout -B "$BR"
+          git add -A -- "${REV[@]}"
+          git commit -m "docs: proposed sync from ${SOURCE_REPO}" -m "Source commit: ${{ steps.files.outputs.sha }}"
+          git push -f origin "$BR"
+          jq -r '"Source: `\(.repo)` @ `\(.commit[0:7])`\n\n| File | Precision | Recall | Style | Quality |\n|---|---|---|---|---|" , (.results[] | select(.outcome=="pending_review") | "| `\(.path)` | \(.metrics.final.precision) | \(.metrics.final.recall) | \(.metrics.final.style) | \(.metrics.final.quality) |")' pipeline-results.json > pr-body.md
+          printf '\nMerging indexes this text into the vector store. Closing without merging leaves the index untouched.\n' >> pr-body.md
+          gh pr view "$BR" >/dev/null 2>&1 \
+            && gh pr edit "$BR" --body-file pr-body.md \
+            || gh pr create --base "$TARGET_BRANCH" --head "$BR" --title "docs: sync from ${SOURCE_REPO} (${SHORT})" --body-file pr-body.md
+
+      - name: Upload decision log and rejected drafts
         if: always()
-        env:
-          SOURCE_REPO: ${{ github.event.client_payload.repository || github.event.inputs.source_repo }}
-          SOURCE_REF: ${{ steps.source_ref.outputs.source_ref }}
-          SOURCE_SHA: ${{ github.event.client_payload.sha || 'N/A' }}
-          TARGET_BRANCH: ${{ steps.target_branch.outputs.target_branch }}
-          INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
-        run: node scripts/generate-summary.js >> $GITHUB_STEP_SUMMARY
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-results-${{ github.run_id }}
+          path: |
+            pipeline-results.json
+            rejected/
+          if-no-files-found: ignore
+
+      - name: Job summary
+        if: always()
+        run: node .multisync/scripts/generate-summary.js >> "$GITHUB_STEP_SUMMARY"

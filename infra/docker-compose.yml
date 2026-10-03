@@ -1,0 +1,88 @@
+# Vector database + FactStore for ai-multisync-tool (VPS demo stack).
+#
+#   cp .env.example .env   # fill in secrets
+#   docker compose --env-file .env -f infra/docker-compose.yml up -d
+#
+# Design notes (kept k8s-friendly):
+#   - Config only via environment variables; no host paths except named volumes.
+#   - Every service has a healthcheck, which maps 1:1 to k8s readiness/liveness probes.
+#   - Ports bind to 127.0.0.1. Never publish Postgres to the internet. Reach the stack from CI via
+#     a self-hosted runner on this host, a WireGuard/Tailscale tunnel, or the optional `edge` proxy
+#     (HTTPS + API key) for Qdrant only.
+name: multisync
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: factstore
+      POSTGRES_USER: ${FACTSTORE_USER:-factstore}
+      POSTGRES_PASSWORD: ${FACTSTORE_PASSWORD:?set FACTSTORE_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FACTSTORE_USER:-factstore} -d factstore"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # Optional TLS front for Qdrant only (profile: edge). Needs DNS pointing at the VPS.
+  edge:
+    profiles: ["edge"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      QDRANT_DOMAIN: ${QDRANT_DOMAIN:?set QDRANT_DOMAIN}
+    command: ["caddy", "reverse-proxy", "--from", "${QDRANT_DOMAIN}", "--to", "qdrant:6333"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+
+  # One-shot: verify connectivity, create the Qdrant collection and FactStore schema.
+  # docker compose --profile tools run --rm pipeline
+  pipeline:
+    profiles: ["tools"]
+    build:
+      context: ..
+      dockerfile: Dockerfile.pipeline
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+      FACTSTORE_DATABASE_URL: postgres://${FACTSTORE_USER:-factstore}:${FACTSTORE_PASSWORD}@postgres:5432/factstore
+      AI_API_BASE_URL: ${AI_API_BASE_URL:-https://api.openai.com}
+      INTERNAL_AI_API_KEY: ${INTERNAL_AI_API_KEY:-}
+      AI_EMBED_MODEL: ${AI_EMBED_MODEL:-text-embedding-3-small}
+      AI_EMBED_DIM: ${AI_EMBED_DIM:-1536}
+    command: ["node", "scripts/healthcheck.js"]
+    depends_on:
+      qdrant: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+
+volumes:
+  qdrant_data:
+  pg_data:
+  caddy_data:
