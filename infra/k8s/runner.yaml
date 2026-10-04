@@ -26,7 +26,7 @@ spec:
     metadata:
       labels: { app: multisync-runner }
     spec:
-      serviceAccountName: multisync-runner   # RBAC: infra/k8s/rbac-personal.yaml (rollout of the docs sites only)
+      serviceAccountName: multisync-runner   # RBAC: infra/k8s/rbac-docs.yaml (rollout of the docs sites only)
       containers:
         - name: runner
           image: myoung34/github-runner:2.321.0   # pin a digest before relying on it in production
