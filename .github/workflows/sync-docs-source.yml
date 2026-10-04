@@ -12,7 +12,7 @@ name: Sync Documentation to Central Repo
 
 env:
   CENTRAL_REPO: 'your-org/your-central-docs-repo'   # <- central docs repo (owner/name)
-  TARGET_BRANCH: 'staging'                          # <- branch in the central repo that receives synced docs
+  TARGET_BRANCH: 'qa'                               # <- branch the docs PR targets: 'qa' = reviewed in QA, then promoted to main (production)
   SYNC_MODE: 'docs'                                 # <- docs | code | both  (must match `mode` in the central config/repos.json)
 
 on:

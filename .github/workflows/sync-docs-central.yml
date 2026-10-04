@@ -9,7 +9,7 @@ name: Sync Documentation
 #   pending_review  trust=review opened as a PR for the technical writer; indexed only after merge
 #   fallback        never published: ticket + Slack alert, draft kept as a workflow artifact
 #
-# Required secrets: DOCS_SYNC_PAT, AI_API_KEY, QDRANT_API_KEY, FACTSTORE_DATABASE_URL, CAIMANDESK_API_TOKEN
+# Required secrets: DOCS_SYNC_PAT, AI_API_KEY, FACTSTORE_DATABASE_URL, CAIMANDESK_API_TOKEN (QDRANT_API_KEY only if your Qdrant has auth)
 # Required variables: QDRANT_URL, CAIMANDESK_PROJECT_ID
 # Tool pin: TOOL_REPO (default rubenalejandrocalderoncorona/ai-multysinc-tool), TOOL_REF (default main)
 # Optional variables: RUNNER_LABEL (e.g. a self-hosted runner on the VPS that can reach
@@ -42,6 +42,10 @@ on:
         required: false
         type: boolean
         default: false
+      pages:
+        description: 'Code mode: only these pages, comma separated (for example data-model.md). Blank = all declared pages'
+        required: false
+        default: ''
 
 # One run per target branch at a time: queue, never cancel, so no dispatch is dropped.
 concurrency:
@@ -73,7 +77,7 @@ jobs:
           [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "invalid source repo"; exit 1; }
           [[ "$SOURCE_SHA_IN" =~ ^[A-Za-z0-9_./-]+$ ]]               || { echo "invalid source ref"; exit 1; }
           [[ "$TARGET_BRANCH" =~ ^[A-Za-z0-9_./-]+$ ]]               || { echo "invalid target branch"; exit 1; }
-          case "$TARGET_BRANCH" in main|master) echo "refusing to write directly to $TARGET_BRANCH"; exit 1;; esac
+          # TARGET_BRANCH may be main/master (the PR base). The pipeline then forces trust=review, so nothing is ever committed there directly.
 
       - name: Checkout this docs repo (default branch, for config and the site)
         uses: actions/checkout@v4
@@ -91,7 +95,12 @@ jobs:
           path: .multisync
 
       - name: Switch to target branch
-        run: git fetch origin "$TARGET_BRANCH" 2>/dev/null && git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
+        run: |
+          if git fetch origin "$TARGET_BRANCH" 2>/dev/null; then
+            git checkout "$TARGET_BRANCH"
+          else
+            git checkout -b "$TARGET_BRANCH"
+          fi
 
       - name: Checkout source repository
         uses: actions/checkout@v4
@@ -144,6 +153,8 @@ jobs:
           AI_EMBED_DIM: ${{ vars.AI_EMBED_DIM || '1536' }}
           QDRANT_URL: ${{ vars.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'docs_chunks' }}
+          QDRANT_CODE_COLLECTION: ${{ vars.QDRANT_CODE_COLLECTION || 'code_context' }}
           FACTSTORE_DATABASE_URL: ${{ secrets.FACTSTORE_DATABASE_URL }}
           TICKET_PROVIDER: ${{ vars.TICKET_PROVIDER || 'caimandesk' }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -152,9 +163,14 @@ jobs:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
           GITHUB_TOKEN: ${{ secrets.DOCS_SYNC_PAT }}
-          GITHUB_HOST: ${{ vars.GITHUB_HOST || 'github.com' }}
+          GIT_HOST: ${{ vars.GIT_HOST || 'github.com' }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           FULL_SYNC: ${{ github.event.inputs.full == 'true' && '1' || '' }}
+          ONLY_PAGES: ${{ github.event.inputs.pages || '' }}
+          # The rest of THIS documentation site is semantic context (terminology, structure, what is covered elsewhere).
+          SITE_REPO: ${{ github.repository }}
+          SITE_DIR: ${{ github.workspace }}
+          CONTEXT_MIN_SCORE: ${{ vars.CONTEXT_MIN_SCORE || '0.45' }}
           DOC_STYLES: ${{ github.workspace }}/config/doc-styles.json
           PROMPTS_DIR: ${{ hashFiles('prompts/judge-docs.md') != '' && format('{0}/prompts', github.workspace) || '' }}
           # Config comes from THIS repo; tool defaults are the fallback.
@@ -179,6 +195,7 @@ jobs:
           fi
 
       - name: Open review PR (review-trust)
+        id: review
         run: |
           mapfile -t REV < <(jq -r '.results[] | select(.outcome=="pending_review" and .action!="none") | .targetPath' pipeline-results.json)
           [ "${#REV[@]}" -gt 0 ] || { echo "nothing needs review"; exit 0; }
@@ -190,9 +207,36 @@ jobs:
           git push -f origin "$BR"
           jq -r '"Source: `\(.repo)` @ `\(.commit[0:7])`\n\n| File | Precision | Recall | Style | Quality |\n|---|---|---|---|---|" , (.results[] | select(.outcome=="pending_review") | "| `\(.path)` | \(.metrics.final.precision) | \(.metrics.final.recall) | \(.metrics.final.style) | \(.metrics.final.quality) |")' pipeline-results.json > pr-body.md
           printf '\nMerging indexes this text into the vector store. Closing without merging leaves the index untouched.\n' >> pr-body.md
-          gh pr view "$BR" >/dev/null 2>&1 \
-            && gh pr edit "$BR" --body-file pr-body.md \
-            || gh pr create --base "$TARGET_BRANCH" --head "$BR" --title "docs: sync from ${SOURCE_REPO} (${SHORT})" --body-file pr-body.md
+          if gh pr view "$BR" >/dev/null 2>&1; then
+            gh pr edit "$BR" --body-file pr-body.md
+          else
+            gh pr create --base "$TARGET_BRANCH" --head "$BR" --title "docs: sync from ${SOURCE_REPO} (${SHORT})" --body-file pr-body.md
+          fi
+          gh pr view "$BR" --json url -q .url > pr-url.txt
+          echo "pr_url=$(cat pr-url.txt)" >> "$GITHUB_OUTPUT"
+
+      # The ticket tracks the PR while it waits for review. Approval = merging the PR; the ticket follows.
+      - name: Open review ticket and link it from the PR
+        if: steps.review.outputs.pr_url != ''
+        env:
+          PR_URL: ${{ steps.review.outputs.pr_url }}
+          ENVIRONMENT: ${{ vars.REVIEW_ENVIRONMENT_NAME || 'QA' }}
+          CAIMANDESK_URL: ${{ vars.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx' }}
+          CAIMANDESK_API_TOKEN: ${{ secrets.CAIMANDESK_API_TOKEN }}
+          CAIMANDESK_PROJECT_ID: ${{ vars.CAIMANDESK_PROJECT_ID }}
+          CAIMANDESK_TRANSPORT: ${{ vars.CAIMANDESK_TRANSPORT }}
+          CAIMANDESK_MCP_URL: ${{ vars.CAIMANDESK_MCP_URL }}
+        run: |
+          OUT=$(node .multisync/scripts/review_ticket.js open || true)
+          echo "$OUT"
+          MARKER=$(echo "$OUT" | tail -1 | jq -r '.marker // empty')
+          URL=$(echo "$OUT" | tail -1 | jq -r '.url // empty')
+          if [ -n "$MARKER" ]; then
+            BR=$(git rev-parse --abbrev-ref HEAD)
+            gh pr view "$BR" --json body -q .body | grep -v 'multisync:ticket=' > pr-body-new.md || true
+            printf '\nTicket: %s\n\n%s\n' "$URL" "$MARKER" >> pr-body-new.md
+            gh pr edit "$BR" --body-file pr-body-new.md
+          fi
 
       - name: Upload decision log and rejected drafts
         if: always()

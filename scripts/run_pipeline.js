@@ -12,6 +12,7 @@
  *   SOURCE_BEFORE   previous commit (default: SOURCE_SHA~1)
  *   SOURCE_DIR      checkout dir (default: source-repo)
  *   FULL_SYNC       1 = (code mode) regenerate every declared page from the whole repo
+ *   ONLY_PAGES      comma list of page paths to regenerate (context is still loaded for every declared page)
  *   RUN_ID          correlation id (default: random)
  *   + AI_*, QDRANT_*, FACTSTORE_DATABASE_URL, see pipeline/config.js
  *
@@ -20,7 +21,6 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
 const { repoPolicy } = require('../pipeline/config');
 const { processChange } = require('../pipeline/pipeline');
 const { escalate } = require('../pipeline/fallback');
@@ -29,25 +29,17 @@ const { loadStyles } = require('../pipeline/prompts');
 const { buildCodeChanges } = require('../pipeline/codesource');
 const { buildDeps, applyDecision } = require('./lib');
 
-const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
-
-const gitList = (dir, rev) => git(dir, 'ls-tree', '-r', '--name-only', rev).split('\n').filter(Boolean);
-const gitDiffNames = (dir, a, b) => git(dir, 'diff', '--name-only', a, b).split('\n').filter(Boolean);
-
-function revExists(dir, rev) {
-  try { git(dir, 'cat-file', '-e', `${rev}^{commit}`); return true; } catch { return false; }
-}
-
-function gitShow(dir, rev, file) {
-  try { return git(dir, 'show', `${rev}:${file}`); } catch { return null; }
-}
+const G = require('./gitutil');
+const { syncContext, syncSite } = require('../pipeline/context');
+const { siteFiles, siteCommit, readSiteFile } = require('./sitedocs');
+const { pagesScope } = require('../pipeline/codesource');
 
 async function main() {
   const d = buildDeps();
   const { cfg } = d;
   const repo = process.env.SOURCE_REPO || 'unknown/unknown';
   const sourceDir = process.env.SOURCE_DIR || 'source-repo';
-  const commit = process.env.SOURCE_SHA || git(sourceDir, 'rev-parse', 'HEAD').trim();
+  const commit = process.env.SOURCE_SHA || G.head(sourceDir);
   const before = process.env.SOURCE_BEFORE || `${commit}~1`;
   const runId = process.env.RUN_ID || crypto.randomUUID();
   const files = (process.env.CHANGED_FILES || '').split(/\s+/).filter(Boolean);
@@ -58,8 +50,14 @@ async function main() {
 
   await d.facts.migrate();
   await d.vectors.ensureCollection();
+  await d.codeVectors.ensureCollection();
 
   const policy = repoPolicy(d.reposConfig, repo);
+  // Never publish straight to a protected branch: when the target is main/master every change goes through a PR.
+  if (/^(main|master)$/.test(process.env.TARGET_BRANCH || '') && policy.trust === 'auto') {
+    console.log(`target branch ${process.env.TARGET_BRANCH} is protected: trust forced from auto to review`);
+    policy.trust = 'review';
+  }
   const instructions = fs.existsSync(cfg.paths.instructions) ? fs.readFileSync(cfg.paths.instructions, 'utf-8') : '';
   const templateFiles = W.findTemplateFiles(cfg.paths.templates);
   const defaultTemplate = path.join(cfg.paths.templates, 'default-template', 'default-template.md');
@@ -79,6 +77,38 @@ async function main() {
   const results = [];
   fs.mkdirSync('rejected', { recursive: true });
 
+  // CONTEXT STAGE: the vector DB must hold the whole repository before any change is analysed.
+  // If it cannot be loaded, code-mode changes fall back (ticket, nothing published) instead of the run crashing.
+  // The rest of the documentation site is semantic context too (terminology, structure, what is covered elsewhere).
+  const siteRepo = process.env.SITE_REPO || '';
+  if (siteRepo && process.env.SITE_DIR) {
+    const t1 = Date.now();
+    const base1 = { runId, repo, path: '*', commit, node: 'sync_site', at: new Date().toISOString() };
+    try {
+      const site = await syncSite({ siteRepo, commit: siteCommit(process.env.SITE_DIR), files: siteFiles(process.env.SITE_DIR), readFile: readSiteFile(process.env.SITE_DIR), docStore: d.vectors, llm: d.llm, facts: d.facts });
+      await logger.log({ ...base1, status: site.skipped ? 'skip' : 'ok', ms: Date.now() - t1, note: site });
+    } catch (e) {
+      await logger.log({ ...base1, status: 'error', ms: Date.now() - t1, note: { error: e.message } }); // degrades context only
+    }
+  }
+
+  let contextError = null;
+  if (policy.mode === 'code' || policy.mode === 'both') {
+    const t0 = Date.now();
+    const base0 = { runId, repo, path: '*', commit, node: 'sync_context', at: new Date().toISOString() };
+    try {
+      const prev0 = G.revExists(sourceDir, before) ? before : '';
+      const stats = await syncContext({
+        repo, commit, before: prev0, full: process.env.FULL_SYNC === '1', git: G.accessors(sourceDir),
+        codeStore: d.codeVectors, docStore: d.vectors, llm: d.llm, facts: d.facts, pages: policy.pages || [], scope: pagesScope(policy.pages), exclude: policy.exclude || [], docs: policy.docs || [],
+      });
+      await logger.log({ ...base0, status: 'ok', ms: Date.now() - t0, note: stats });
+    } catch (e) {
+      contextError = e;
+      await logger.log({ ...base0, status: 'error', ms: Date.now() - t0, note: { error: e.message } });
+    }
+  }
+
   const targetBase = policy.targetPath || path.join(cfg.paths.docsRoot, 'services', policy.serviceName);
   const changes = [];
   if (policy.mode !== 'code') {
@@ -86,34 +116,38 @@ async function main() {
       const full = path.join(sourceDir, file);
       changes.push({
         repo, filePath: file, commit, kind: 'docs',
-        before: gitShow(sourceDir, before, file),
+        before: G.readAt(sourceDir, before, file),
         after: fs.existsSync(full) ? fs.readFileSync(full, 'utf-8') : null,
       });
     }
   }
   if (policy.mode === 'code' || policy.mode === 'both') {
-    const prev = revExists(sourceDir, before) ? before : ''; // first commit / new branch => document everything in scope
+    const prev = G.revExists(sourceDir, before) ? before : ''; // first commit / new branch => document everything in scope
     changes.push(...buildCodeChanges({
       repo, policy, commit, before: prev, full: process.env.FULL_SYNC === '1',
-      listFiles: (rev) => gitList(sourceDir, rev),
-      readAt: (rev, f) => gitShow(sourceDir, rev, f),
-      changedBetween: (a2, b2) => gitDiffNames(sourceDir, a2, b2),
+      ...G.accessors(sourceDir),
       readExistingPage: (page) => {
         const f = path.join(targetBase, page);
         return fs.existsSync(f) ? fs.readFileSync(f, 'utf-8').replace(/^---\n[\s\S]*?\n---\n+/, '') : '';
       },
     }));
   }
-  console.log(`mode=${policy.mode || 'docs'} | ${changes.length} change unit(s)`);
+  // ONLY_PAGES=data-model.md,overview.md regenerates just those pages while the context stays loaded for ALL declared pages.
+  const only = (process.env.ONLY_PAGES || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (only.length) {
+    for (let i = changes.length - 1; i >= 0; i--) if (changes[i].kind === 'code' && !only.includes(changes[i].filePath)) changes.splice(i, 1);
+  }
+  console.log(`mode=${policy.mode || 'docs'} | ${changes.length} change unit(s)${only.length ? ` (only: ${only.join(', ')})` : ''}`);
 
   for (const change of changes) {
     const file = change.filePath;
     let decision;
     try {
+      if (contextError && change.kind === 'code') throw new Error(`context sync failed: ${contextError.message}`);
       decision = await processChange(change, {
         styles,
-        cfg, llm: d.llm, vectors: d.vectors, facts: d.facts, registry: d.registry, policy, instructions,
-        templateFiles, defaultTemplate, runId, githubHost: process.env.GITHUB_HOST, logger, escalate: escalateFn,
+        cfg, llm: d.llm, vectors: d.vectors, codeVectors: d.codeVectors, facts: d.facts, registry: d.registry, policy, instructions,
+        templateFiles, defaultTemplate, runId, githubHost: process.env.GIT_HOST, logger, escalate: escalateFn, siteRepo: siteRepo || undefined,
       });
     } catch (e) {
       // Infrastructure failure (AI/Qdrant/Postgres down): fail safe, never publish.

@@ -14,11 +14,14 @@
     "index:approved": "node scripts/index_approved.js",
     "healthcheck": "node scripts/healthcheck.js",
     "demo": "node scripts/demo.js",
-    "demo:offline": "node scripts/demo.js --offline"
+    "demo:offline": "node scripts/demo.js --offline",
+    "test:integration": "node --test test/integration/*.test.js",
+    "bootstrap": "node scripts/bootstrap_context.js"
   },
   "dependencies": {
     "@langchain/core": "^1.2.14",
     "@langchain/langgraph": "^1.4.18",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "pg": "^8.13.0"
   },
   "engines": {

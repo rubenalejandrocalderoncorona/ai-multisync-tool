@@ -1,0 +1,163 @@
+name: CI/CD
+
+# Pull requests and pushes: verify everything. Pushes to main: also publish the pipeline image.
+#
+#   test ─┬─ integration (real Qdrant + Postgres service containers) ─┐
+#         ├─ validate (workflow lint, compose, kustomize, secret scan) ┼─ image ─ publish (main only)
+#         └────────────────────────────────────────────────────────────┘
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit + CLI end-to-end tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Runtime dependencies only: proves the pipeline needs nothing from the Astro site tooling.
+      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      - run: npm test
+
+  integration:
+    name: Integration (real Qdrant + Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.12.4
+        ports: ['6333:6333']
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: factstore
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: factstore
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U factstore -d factstore"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      QDRANT_URL: http://127.0.0.1:6333
+      FACTSTORE_DATABASE_URL: postgres://factstore:ci-only-password@127.0.0.1:5432/factstore
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Wait for Qdrant
+        run: |
+          for _ in $(seq 1 30); do curl -fsS "$QDRANT_URL/readyz" >/dev/null && exit 0; sleep 2; done
+          echo "Qdrant did not become ready"; exit 1
+      - name: Apply the compose init SQL (same file the VPS stack uses)
+        run: |
+          sudo apt-get install -y -qq postgresql-client >/dev/null
+          PGPASSWORD=ci-only-password psql -h 127.0.0.1 -U factstore -d factstore -v ON_ERROR_STOP=1 -f infra/postgres/init.sql
+      - run: npm run test:integration
+
+  validate:
+    name: Lint workflows, validate infra, scan for secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read   # gitleaks lists the PR's commits through the API
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: raven-actions/actionlint@v2
+      - name: docker compose config
+        run: docker compose --env-file .env.example -f infra/docker-compose.yml config -q
+      - name: kustomize render (cluster base and standalone)
+        run: |
+          kubectl kustomize infra/k8s >/dev/null
+          kubectl kustomize infra/k8s/standalone >/dev/null
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  image:
+    name: Build pipeline image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [test, integration, validate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.pipeline
+          load: true
+          tags: ai-multysinc-pipeline:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the image
+        run: |
+          docker run --rm ai-multysinc-pipeline:ci node -e "require('./pipeline/pipeline'); require('./pipeline/context'); console.log('image loads the pipeline')"
+          docker run --rm -e VECTOR_DRIVER=memory -e FACTSTORE_DRIVER=memory ai-multysinc-pipeline:ci node scripts/doctor.js --env-only || true
+          docker run --rm ai-multysinc-pipeline:ci sh -c 'test -f prompts/judge-code.md && test -f config/doc-styles.json && test -f infra/postgres/init.sql'
+
+  publish:
+    name: Publish image to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: image
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ai-multysinc-pipeline
+          tags: |
+            type=sha,format=short
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.pipeline
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/ai-multysinc-pipeline
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

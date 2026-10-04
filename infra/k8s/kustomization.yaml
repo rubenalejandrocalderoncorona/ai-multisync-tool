@@ -1,9 +1,11 @@
+# Target: the existing `multirepo` namespace on the VPS (Qdrant and Postgres already run there).
+#   kubectl kustomize infra/k8s            render
+#   For a fresh cluster without the databases, apply infra/k8s/standalone first.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: multisync
+namespace: multirepo
 resources:
-  - namespace.yaml
-  - qdrant.yaml
-  - postgres.yaml
   - migrate-job.yaml
-# secrets.example.yaml is intentionally NOT listed.
+  - runner.yaml
+  - rbac-docs.yaml
+# NOT listed on purpose: secrets.example.yaml.

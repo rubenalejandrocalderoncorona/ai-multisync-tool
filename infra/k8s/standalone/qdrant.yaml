@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: qdrant
-  namespace: multisync
+  namespace: multirepo
 spec:
   serviceName: qdrant
   replicas: 1
@@ -35,7 +35,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: qdrant
-  namespace: multisync
+  namespace: multirepo
 spec:
   selector: { app: qdrant }
   ports: [{ name: http, port: 6333, targetPort: http }]

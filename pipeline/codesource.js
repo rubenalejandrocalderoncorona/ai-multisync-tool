@@ -64,10 +64,13 @@ function snapshot(readFile, files, { changed = [], maxChars = 60000, maxFileChar
   return { text: out, files: included };
 }
 
+/** Union of what the declared pages are allowed to read; no pages (or a page without scope) means everything. */
+const pagesScope = (pages = []) => (pages.length && pages.every((p) => p.scope?.length) ? [...new Set(pages.flatMap((p) => p.scope))] : ['**']);
+
 /**
  * @param {object} a
  * @param {string} a.repo
- * @param {object} a.policy        repo policy (mode, pages, style)
+ * @param {object} a.policy        repo policy (mode, pages, style, exclude)
  * @param {string} a.commit        commit being documented
  * @param {string} [a.before]      previous commit ('' = first run / full sync)
  * @param {(rev:string)=>string[]} a.listFiles
@@ -78,25 +81,27 @@ function snapshot(readFile, files, { changed = [], maxChars = 60000, maxFileChar
  * @returns {object[]} change units (kind: 'code'); pages whose files did not change are omitted
  */
 function buildCodeChanges({ repo, policy, commit, before, listFiles, readAt, changedBetween, readExistingPage, full = false }) {
+  if (full) before = ''; // a forced full sync treats every page as new, so the prefilter cannot call it "no change"
   const pages = policy.pages?.length ? policy.pages : [{ path: 'overview.md', kind: policy.style }];
   const afterFiles = listFiles(commit);
   const beforeFiles = before ? listFiles(before) : [];
   const changedAll = full || !before ? afterFiles : changedBetween(before, commit);
   const units = [];
   for (const page of pages) {
-    const scoped = selectFiles(afterFiles, page);
+    const scoped = selectFiles(afterFiles, { ...page, exclude: [...(page.exclude || []), ...(policy.exclude || [])] });
     const changed = scoped.filter((f) => changedAll.includes(f));
-    const removed = selectFiles(beforeFiles, page).filter((f) => !afterFiles.includes(f) && changedAll.includes(f));
+    const removed = selectFiles(beforeFiles, { ...page, exclude: [...(page.exclude || []), ...(policy.exclude || [])] }).filter((f) => !afterFiles.includes(f) && changedAll.includes(f));
     if (!changed.length && !removed.length) continue;
     const after = snapshot((f) => readAt(commit, f), scoped, { changed });
-    const prev = before ? snapshot((f) => readAt(before, f), selectFiles(beforeFiles, page), { changed: changed.concat(removed) }) : { text: '' };
+    const prev = before ? snapshot((f) => readAt(before, f), selectFiles(beforeFiles, { ...page, exclude: [...(page.exclude || []), ...(policy.exclude || [])] }), { changed: changed.concat(removed) }) : { text: '' };
     units.push({
       kind: 'code', repo, filePath: page.path, styleKey: page.kind || policy.style || null, commit,
       before: prev.text || null, after: after.text, existing: readExistingPage(page.path) || '',
+      brief: page.brief || '', title: page.title || '', repoMap: scoped.slice(0, 400), snapshotFiles: after.files,
       changedFiles: [...changed, ...removed.map((f) => `${f} (removed)`)],
     });
   }
   return units;
 }
 
-module.exports = { globToRegExp, selectFiles, snapshot, buildCodeChanges, scrub, DEFAULT_EXCLUDE };
+module.exports = { pagesScope, globToRegExp, selectFiles, snapshot, buildCodeChanges, scrub, DEFAULT_EXCLUDE };

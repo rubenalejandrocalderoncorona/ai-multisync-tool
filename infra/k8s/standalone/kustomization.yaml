@@ -1,0 +1,9 @@
+# Only for a cluster that does NOT already run Qdrant and Postgres. On the VPS they already exist
+# in the `multirepo` namespace, so use ../ (the parent kustomization) instead.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: multirepo
+resources:
+  - namespace.yaml
+  - qdrant.yaml
+  - postgres.yaml

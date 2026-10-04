@@ -70,7 +70,7 @@ function desk(existing = []) {
   };
   return { f, calls };
 }
-const alerts = { ticketProvider: 'caimandesk', deskBaseUrl: 'https://tickets.example', deskToken: 'tok', deskProjectId: '7' };
+const alerts = { ticketProvider: 'caimandesk', deskTransport: 'rest', deskBaseUrl: 'https://tickets.example', deskToken: 'tok', deskProjectId: '7' };
 const failure = { repo: 'org/svc', path: 'docs/a.md', commit: 'c1', reviewerAction: 'auto_rejected', rootCauseTag: 'iteration_cap_exceeded', reason: 'did not converge', attempts: [{ n: 1, precision: 0.4, recall: 1, style: 1, quality: 1, failure: 'hallucinated_claim' }], feedback: ['Unsupported claim: <script>'], draft: '# d' };
 
 test('cAImanDesk: creates a task in the configured project with bearer auth and HTML-escaped body', async () => {

@@ -1,0 +1,33 @@
+# Lets the in-cluster runner roll out the documentation sites, and nothing else.
+# Scope: only the two Deployments docs-qa and docs-prod in this namespace (get/patch/update, read status).
+# It cannot read secrets, create resources, or touch any other namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: docs-deployer
+  namespace: multirepo
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["docs-qa", "docs-prod"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/status", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: docs-deployer
+  namespace: multirepo
+subjects:
+  - kind: ServiceAccount
+    name: multisync-runner
+    namespace: multirepo
+roleRef:
+  kind: Role
+  name: docs-deployer
+  apiGroup: rbac.authorization.k8s.io

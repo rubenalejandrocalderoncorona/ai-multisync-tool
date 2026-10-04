@@ -1,156 +1,182 @@
-# What you need to provide
+# What is in place, and what you still need to provide
 
-Everything below is outside the repository: credentials, endpoints and a few GitHub settings. Nothing here is stored in code.
-Run `node scripts/doctor.js` at any time; it checks each item (never printing a secret) and tells you what is still missing.
+Run `node scripts/doctor.js` at any time. It checks every item below (never printing a secret) and lists what is missing.
 
-## 1. Infrastructure map
+See [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md) to connect a repository (worked example: CalendarScheduler into the QA and production documentation site).
 
-Red items are what is **not yet provided or not yet verified**. Green items exist.
+## 1. Status
+
+| Area | Status | Evidence |
+|---|---|---|
+| Qdrant + PostgreSQL in `multirepo` | **Verified** and populated | integration suite passes against them; loaded: `rurag`, CalendarScheduler (625 files, 1,147 code chunks, 217 semantic chunks) and 74 pages of the older docs site |
+| Pipeline: both context stages, GAR, judge loop, coverage check, fallback | **Verified on real data** | 116 unit/CLI tests, 3 integration tests, and real runs on two repos (OpenAI + VPS databases) |
+| Ticketing through Vikunja's built-in MCP | **Verified live** | create, find, comment, close and delete against `tickets.caimanlabs.com.mx` |
+| QA/prod promotion flow (workflows) | Written, `actionlint`-clean, **never run on GitHub** | |
+| Documentation sites at `/documentation` and `/documentation/qa` (build, image, link check) | **Verified locally** | both images served correctly under their base paths |
+| Documentation sites **deployed** | **Done** (2026-10-04) | `docs-prod` and `docs-qa` run in `multirepo` from locally built images; `https://rubenalejandrocalderoncorona.org/documentation/` and `/documentation/qa/` return 200 through Cloudflare and directly at the origin. CI will later replace the local images with GHCR images |
+| CI/CD of the tool | Running on GitHub | unit, integration, lint and secret scan pass; image build fixed (it was missing `prompts/`) |
+| In-cluster GitHub runner | **Missing** | manifest written; needs its token |
+| Secrets and variables on the central repo | **Missing** | section 4 |
+| The same run inside GitHub Actions | **Not done** | |
+
+## 2. Infrastructure map
+
+Red = missing, amber = exists but a credential is missing, green = exists and verified.
 
 ```mermaid
 flowchart LR
-  subgraph GH["GitHub (rubenalejandrocalderoncorona / cAImanLabs)"]
+  subgraph GH["GitHub"]
     SRC["Source repos<br/>push to main"]
-    SW["sync-docs-source.yml<br/>(in each source repo)"]
-    CW["sync-docs-central.yml<br/>sync-docs-approved.yml<br/>(in caimanlabs-portfolio-docs)"]
-    TOOL["ai-multysinc-tool<br/>(pipeline code, pinned by TOOL_REF)"]
+    SW["sync-docs-source.yml"]
+    CW["Central repo: portfolio<br/>sync / approved / bootstrap workflows"]
+    TOOL["ai-multysinc-tool<br/>pipeline code + CI/CD"]
+    GHCR["GHCR image<br/>ai-multysinc-pipeline"]
     PR["Review PR<br/>docs-sync/*"]
-    SITE["Starlight site<br/>caimanlabs-portfolio-docs"]
   end
 
-  subgraph RUN["Runner"]
-    R["Self-hosted runner on the VPS<br/>(or GitHub-hosted + tunnel)"]
+  subgraph K3S["VPS: k3s cluster, namespace multirepo"]
+    RUN["multisync-runner pod<br/>GitHub Actions runner"]
+    Q[("Qdrant<br/>docs_chunks: semantic context<br/>code_context: code context")]
+    PG[("PostgreSQL<br/>schema multisync:<br/>claims, decisions,<br/>node_logs, context_state")]
+    MIG["multisync-migrate Job"]
   end
 
-  subgraph VPS["Your VPS"]
-    Q[("Qdrant<br/>approved doc chunks")]
-    PG[("Postgres FactStore<br/>claims, decisions, node_logs")]
-  end
-
-  LLM["LLM provider (OpenAI-compatible)<br/>writer + judge + embeddings"]
+  LLM["LLM provider (OpenAI-compatible)<br/>analyst + planner + writer + judge<br/>+ embeddings"]
   DESK["cAImanDesk<br/>tickets.caimanlabs.com.mx"]
-  SLACK["Slack webhook (optional)"]
-  HOST["Site hosting<br/>ghcr image + k8s ingress + domain"]
+  SITE["Starlight site hosting<br/>+ domain"]
 
   SRC --> SW -->|"repository_dispatch<br/>DOCS_SYNC_PAT"| CW
+  TOOL -->|"CI: unit + integration + lint"| TOOL
+  TOOL -->|"publish on main"| GHCR
+  GHCR --> MIG
+  CW -->|"job runs on label multisync"| RUN
   CW -->|"checkout"| TOOL
-  CW --> R
-  R -->|"QDRANT_URL + QDRANT_API_KEY"| Q
-  R -->|"FACTSTORE_DATABASE_URL"| PG
-  R -->|"INTERNAL_AI_API_KEY"| LLM
-  R -->|"CAIMANDESK_API_TOKEN<br/>+ PROJECT_ID"| DESK
-  R -.->|"SLACK_WEBHOOK_URL"| SLACK
-  R -->|"auto trust: commit<br/>review trust: open PR"| PR
-  PR -->|"merge = human approval<br/>index approved text"| Q
-  PR --> SITE --> HOST
+  RUN -->|"http://qdrant:6333 (no auth, internal only)"| Q
+  RUN -->|"postgres:5432"| PG
+  MIG --> Q
+  MIG --> PG
+  RUN -->|"AI_API_KEY"| LLM
+  RUN -->|"API token + project id"| DESK
+  RUN -->|"auto: commit, review: open PR"| PR
+  PR -->|"merge = human approval, index approved text"| Q
+  PR --> SITE
 
   classDef missing fill:#fde2e2,stroke:#c0392b,color:#7b1d12;
   classDef have fill:#e1f5e1,stroke:#2e7d32,color:#14401a;
   classDef partial fill:#fff4d6,stroke:#b8860b,color:#6b4e00;
-  class Q,PG,LLM,R,SLACK,HOST missing;
+  class RUN,LLM,SITE missing;
   class DESK partial;
-  class SRC,SW,CW,TOOL,PR,SITE have;
+  class Q,PG,SRC,SW,CW,TOOL,PR,MIG,GHCR have;
 ```
 
-| Colour | Meaning |
-|---|---|
-| Red | Not provided yet, or code written but never run against the real service |
-| Amber | The service exists and its API contract was verified; the token and project id are missing |
-| Green | Exists in code / GitHub |
+Qdrant has no authentication, so it must stay cluster-internal. That is why the runner lives inside the cluster instead of exposing it.
 
-## 2. How one change flows (and which dependency each stage touches)
+## 3. How one run works: two context stages
+
+Before anything is analysed, the vector database must hold the whole repository. Then two separate LLM stages read it:
+**stage 1 (code context)** establishes what is true from the code; **stage 2 (semantic context)** decides what the documentation should contain.
 
 ```mermaid
 flowchart TD
-  A["Push to a source repo"] --> B["prefilter<br/>no network"]
-  B -->|"trivial or wording only"| X1["END: skipped<br/>0 tokens"]
+  S0["sync_context (run start, no LLM)<br/>whole repo into Qdrant:<br/>first run or index out of date: FULL<br/>otherwise only changed files"] --> B["prefilter<br/>no network"]
+  B -->|"trivial or wording only"| X1["END: skipped, 0 tokens"]
   B --> C["cross_repo<br/>Postgres"]
-  C -->|"registered feature not shipped everywhere"| F
-  C --> D["similarity<br/>embeddings + Qdrant"]
-  D -->|"shape unchanged and already documented"| X2["END: refreshed<br/>commit key updated, no writer/judge"]
-  D --> E["gar<br/>LLM fast model: hypothetical paragraph"]
-  E --> G["write_draft<br/>LLM + Qdrant context + style prompt"]
-  G --> H["judge<br/>LLM as a judge: precision, recall, style, quality"]
-  H -->|"grounded but awkward"| P["polish_draft<br/>language only"]
-  P --> H
-  H -->|"fail, retries left"| G
-  H -->|"cap reached once"| W["widen<br/>top_k 5 to 12, one more round"]
-  W --> G
-  H -->|"pass"| U["publish"]
-  H -->|"cap reached again"| F["fallback"]
-  F --> T["Ticket in cAImanDesk<br/>+ Slack + rejected draft artifact"]
-  U -->|"trust: auto"| I["commit + index in Qdrant"]
-  U -->|"trust: review"| R["Pull request"]
-  R -->|"merged"| I
-  R -->|"closed unmerged"| X3["index untouched"]
+  C -->|"feature not shipped everywhere"| F
+  C --> D["similarity<br/>embeddings vs approved text"]
+  D -->|"shape unchanged and already documented"| X2["END: refreshed"]
+  D --> E1["code_context: LLM STAGE 1<br/>changed code + related code retrieved from<br/>the WHOLE repo index + repo map<br/>produces a FACT SHEET with evidence"]
+  E1 --> G["gar<br/>hypothetical paragraph, template, known facts"]
+  G --> E2["semantic_context: LLM STAGE 2<br/>fact sheet + page brief + style rubric +<br/>existing page + related docs from the docs index<br/>produces a PLAN: sections, must-cover facts, gaps"]
+  E2 --> W["write_draft<br/>follows the plan, uses only the evidence"]
+  W --> J["judge: LLM as a judge<br/>claims vs CODE + RELATED_CODE, coverage vs plan<br/>precision, recall, style, quality"]
+  J -->|"grounded but awkward"| P["polish_draft"]
+  P --> J
+  J -->|"fail, retries left"| W
+  J -->|"cap reached once"| WD["widen: re-run BOTH context<br/>stages with a bigger budget"]
+  WD --> E1
+  J -->|"pass"| U["publish"]
+  J -->|"cap reached again"| F["fallback"]
+  F --> T["cAImanDesk ticket + Slack + rejected draft"]
+  U -->|"trust auto"| I["commit + index"]
+  U -->|"trust review"| R["Pull request, merge = approval, then index"]
 
   classDef llm fill:#e8e4ff,stroke:#5b43c9;
   classDef store fill:#e0f0ff,stroke:#1565c0;
   classDef stop fill:#eee,stroke:#777;
   classDef bad fill:#fde2e2,stroke:#c0392b;
-  class E,G,H,P,W llm;
-  class C,D,I store;
-  class X1,X2,X3 stop;
+  class E1,E2,G,W,J,P,WD llm;
+  class S0,C,D,I store;
+  class X1,X2 stop;
   class F,T bad;
 ```
 
-Every node writes one row to `node_logs` (Postgres) and one line to the runner log.
+The two stages only run in `code` and `both` modes. In `docs` mode the source already is documentation, so they are skipped and cost nothing.
+Every node writes a row to `multisync.node_logs` and a line to the runner log.
 
-## 3. Credentials and endpoints you need to provide
+## 4. What you provide
 
-### On the VPS (run once)
+### In the cluster (once)
 
 | # | Item | How |
 |---|---|---|
-| 1 | Docker + Compose on the VPS | install normally |
-| 2 | `QDRANT_API_KEY`, `FACTSTORE_PASSWORD` | choose long random values; put in `.env` (copy `.env.example`) |
-| 3 | Start the stack | `make stack-up`, then `make stack-check` |
-| 4 | A way for CI to reach it | one of: a self-hosted GitHub runner on the VPS (recommended), WireGuard/Tailscale, or `--profile edge` for Qdrant over HTTPS (needs `QDRANT_DOMAIN`). Never publish Postgres |
+| 1 | Pipeline image | merge to `main`: CI publishes `ghcr.io/<you>/ai-multysinc-pipeline`. Make the package readable by the cluster or add a pull secret |
+| 2 | Secret with the database URL | `kubectl -n multirepo create secret generic multisync-secrets --from-literal=FACTSTORE_DATABASE_URL='postgresql://<user>:<password>@postgres:5432/<database>'` (the values are in the existing `postgres-credentials` secret) |
+| 3 | Secret for the runner | `kubectl -n multirepo create secret generic multisync-runner --from-literal=ACCESS_TOKEN=<fine-grained PAT, Administration: read/write on the central repo>` |
+| 4 | Apply | run the **Deploy to cluster** workflow, or `kubectl kustomize infra/k8s \| sed "s#__PIPELINE_IMAGE__#<image>:<tag>#" \| kubectl apply -f -` |
 
-### GitHub secrets and variables
+### On the central repo `portfolio` (Settings > Secrets and variables > Actions)
 
-Set these on **`caimanlabs-portfolio-docs`** (the central repo): Settings > Secrets and variables > Actions.
+| Kind | Name | Required | Value |
+|---|---|---|---|
+| secret | `DOCS_SYNC_PAT` | yes | fine-grained token: central repo (Contents, Pull requests, Workflows: write) + each source repo (Contents: read) |
+| secret | `AI_API_KEY` | yes | your LLM provider key |
+| secret | `FACTSTORE_DATABASE_URL` | yes | `postgresql://<user>:<password>@postgres:5432/<database>` (in-cluster name) |
+| secret | `CAIMANDESK_API_TOKEN` | yes | cAImanDesk > Settings > API tokens (allow creating tasks and comments) |
+| secret | `QDRANT_API_KEY` | no | only if you add auth to Qdrant later |
+| secret | `SLACK_WEBHOOK_URL` | no | optional alerts |
+| variable | `QDRANT_URL` | yes | `http://qdrant:6333` |
+| variable | `RUNNER_LABEL` | yes | `multisync` (the in-cluster runner) |
+| variable | `CAIMANDESK_PROJECT_ID` | yes | number in the cAImanDesk project URL |
+| variable | `CAIMANDESK_TRANSPORT`, `CAIMANDESK_MCP_URL`, `CAIMANDESK_PUBLIC_URL` | no | default transport is `mcp` (Vikunja's built-in MCP, `<CAIMANDESK_URL>/api/v2/mcp`); set `CAIMANDESK_URL` to the in-cluster service and `CAIMANDESK_PUBLIC_URL` to the public address when running on the in-cluster runner |
+| variable | `REVIEW_ENVIRONMENT_NAME`, `QA_URL`, `QA_BRANCH`, `PROD_BRANCH` | no | defaults `QA`, `https://rubenalejandrocalderoncorona.org/documentation/qa/`, `qa`, `main` |
+| variable | `DEPLOY_ENABLED` | for deploys | `true` once `deploy/k8s.yaml` has been applied; until then the site deploy job is skipped |
+| variable | `AI_API_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL`, `AI_EMBED_MODEL`, `AI_EMBED_DIM` | no | defaults: OpenAI, `gpt-4o`, `gpt-4o-mini`, `text-embedding-3-small`, `1536` (`AI_EMBED_DIM` must match the embedding model) |
+| variable | `TOOL_REPO`, `TOOL_REF` | no | defaults: this repo, `main` |
 
-| Kind | Name | Required | Where to get it | Used by |
-|---|---|---|---|---|
-| secret | `DOCS_SYNC_PAT` | yes | GitHub > Settings > Developer settings > fine-grained token. Repos: the central repo (Contents, Pull requests, Workflows: write) and every source repo (Contents: read) | checkout of source repos, PR creation, issue fallback |
-| secret | `AI_API_KEY` | yes | your LLM provider | writer, judge, embeddings |
-| secret | `QDRANT_API_KEY` | yes | the value you chose in step 2 | vector store |
-| secret | `FACTSTORE_DATABASE_URL` | yes | `postgres://factstore:<FACTSTORE_PASSWORD>@<host>:5432/factstore` | FactStore |
-| secret | `CAIMANDESK_API_TOKEN` | yes | cAImanDesk > Settings > API tokens; allow creating tasks and comments | fallback tickets |
-| secret | `SLACK_WEBHOOK_URL` | no | Slack incoming webhook | alerts |
-| variable | `QDRANT_URL` | yes | e.g. `http://localhost:6333` on a VPS runner, or your HTTPS URL | vector store |
-| variable | `CAIMANDESK_PROJECT_ID` | yes | number in the cAImanDesk project URL (`/projects/<id>`) | fallback tickets |
-| variable | `RUNNER_LABEL` | if the runner is self-hosted | the label you gave the VPS runner | where jobs run |
-| variable | `AI_API_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL`, `AI_EMBED_MODEL`, `AI_EMBED_DIM` | no | defaults: OpenAI, `gpt-4o`, `gpt-4o-mini`, `text-embedding-3-small`, `1536` | model choice. `AI_EMBED_DIM` must match the embedding model |
-| variable | `TOOL_REPO`, `TOOL_REF` | no | defaults: `rubenalejandrocalderoncorona/ai-multysinc-tool`, `main` | pins the pipeline version |
-
-In **each source repo**: secret `DOCS_SYNC_PAT` (a token that can dispatch to the central repo), and the copied `sync-docs-source.yml` with `CENTRAL_REPO`, `TARGET_BRANCH` and `SYNC_MODE` set.
+For the deploy workflow, the `vps` Environment of the **tool** repo needs secrets `VPS_SSH_KEY`, `VPS_KNOWN_HOSTS` and variables `VPS_HOST`, `VPS_USER`.
 
 ### The judge
 
-You said you will provide the judge. The pipeline only needs an OpenAI-compatible chat endpoint:
+You provide the model. The writer, analyst, planner and judge all use the OpenAI-compatible endpoint above (`AI_MODEL`). The prompts are written: `prompts/judge-docs.md`, `prompts/judge-code.md`, `prompts/analyze-code.md`, `prompts/plan-docs.md`. To judge with a different, stronger model, ask for an `AI_JUDGE_MODEL` setting.
 
-| Setting | Meaning |
+## 5. First successful run
+
+1. Deploy to the cluster (table above) and run `node scripts/doctor.js` until clean.
+2. In the central repo run **Bootstrap Context** for one project (for example `rubenalejandrocalderoncorona/raibis-lifeos`, mode `code`). Check the run log: the whole repo is now in Qdrant (`code chunks`, `semantic chunks`).
+3. Copy `sync-docs-source.yml` into that project with `SYNC_MODE: 'code'`, push a small change, and watch the **Sync Documentation** run. Read each node line: similarity score, facts found, plan sections, judge scores.
+4. Review the pull request it opens. Merging is the human approval that indexes the page.
+5. To see the fallback path, set `PRECISION_MIN=1.01` as a repo variable for one run: the judge loop widens, escalates, and a ticket appears in cAImanDesk.
+
+To rehearse steps 2 to 4 from your laptop first, open a tunnel (`ssh -L 16334:<qdrant ClusterIP>:6333 -L 15433:<postgres ClusterIP>:5432 vps`), export `QDRANT_URL`, `FACTSTORE_DATABASE_URL` and `INTERNAL_AI_API_KEY`, then run `node scripts/bootstrap_context.js --repo owner/name --dir <checkout>`.
+
+## 6. Still to calibrate with real data
+
+| Item | Default |
 |---|---|
-| `AI_API_BASE_URL` + `AI_API_PATH` | endpoint (default `https://api.openai.com` + `/v1/chat/completions`) |
-| `AI_MODEL` | the model used for the writer **and** the judge. To use a different, stronger model for judging only, tell me and I will add a `AI_JUDGE_MODEL` setting |
-| prompts | already written: `prompts/judge-docs.md`, `prompts/judge-code.md` |
+| `SIMILARITY_HIGH` | 0.92 (demo uses 0.85); read `minChunkSimilarity` in the logs |
+| Judge thresholds | precision 0.90, recall 0.80, style 0.70, quality 0.75 |
+| Context budget | 12 code chunks (30 widened), 30,000 characters |
 
-### Needed before the live demo can be called verified
+## 7. What the first real run taught us (already fixed)
 
-| # | Item | Status |
-|---|---|---|
-| a | Qdrant and Postgres running on the VPS and reachable from the runner | not verified (the Docker daemon was off while building; the adapters are tested against fakes) |
-| b | `similarity` threshold calibrated with real embeddings | default `0.85` is a guess; run the live demo and read `minChunkSimilarity` |
-| c | judge thresholds calibrated on a few real pages | defaults `precision >= 0.90`, `recall >= 0.80`, `style >= 0.70`, `quality >= 0.75` |
-| d | cAImanDesk token verified against the project | `node scripts/doctor.js` checks it |
-| e | a domain and k8s ingress for the portfolio site | placeholders in `deploy/k8s.yaml` of the portfolio repo |
+| Finding | Fix |
+|---|---|
+| OpenAI returned `429` (30k tokens/minute) mid-run and the whole run failed | The LLM client retries rate limits, 5xx and network errors, waiting as long as the server asks (`AI_MAX_RETRIES`, default 5) |
+| The writer invented a Change History date (2023) | The table is generated by code from the real commit and date; any model-written one is removed |
+| The page title was "Description" (a template heading) | Title comes from `pages[].title` or the service name; description from the plan's purpose |
+| A page declared as `overview.md` was moved into `concepts/` | Code-mode pages keep their declared path |
+| Dead `(#)` link, external links and a troubleshooting row not in the source | Prompt precedence (these rules beat the template) and the judge now treats every link, date and troubleshooting statement as a claim |
+| The judge knew the page omitted the nine MCP tools but a 0.85 recall still passed | Facts are flagged `core`; any missing core fact fails (`CORE_RECALL_MIN=1`) and the writer is told exactly which |
+| `sync_context` indexed files outside the page scopes (including restricted notes in `eval/fixtures`) | The index honors page `scope` and a repo-level `exclude`, with a test proving excluded files never reach the embedding call |
 
-## 4. Order of operations
-
-1. VPS: `make stack-up` and `make stack-check`.
-2. Local: copy `.env.example` to `.env`, fill it, run `node scripts/doctor.js` until it is clean.
-3. `npm run demo` (live) and read the similarity and judge numbers; adjust thresholds.
-4. Set the GitHub secrets and variables above on the central repo.
-5. Copy `sync-docs-source.yml` into one source repo, trigger it, watch the run.
+Known limit: one unsupported sentence in about 19 claims scores 0.947 and passes the 0.90 precision threshold. To forbid that, set `PRECISION_MIN=0.95` or higher.

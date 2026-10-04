@@ -11,10 +11,12 @@ const path = require('path');
 function buildDeps(env = process.env) {
   const cfg = loadConfig(env);
   const llm = new LLM(cfg.ai);
-  const vectors = cfg.qdrant.driver === 'memory' ? new MemoryVectorStore() : new QdrantStore(cfg.qdrant, cfg.ai.embedDim);
+  const memory = cfg.qdrant.driver === 'memory';
+  const vectors = memory ? new MemoryVectorStore() : new QdrantStore(cfg.qdrant, cfg.ai.embedDim);
+  const codeVectors = memory ? new MemoryVectorStore() : new QdrantStore(cfg.qdrant, cfg.ai.embedDim, undefined, cfg.qdrant.codeCollection);
   const facts = createFactStore(cfg.factstore);
   return {
-    cfg, llm, vectors, facts,
+    cfg, llm, vectors, codeVectors, facts,
     reposConfig: readJson(cfg.paths.reposConfig, { defaults: {}, repos: {} }),
     registry: readJson(cfg.paths.featureRegistry, {}),
   };

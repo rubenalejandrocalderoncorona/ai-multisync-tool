@@ -1,21 +1,27 @@
-# Creates the Qdrant collection and FactStore schema. Re-runnable (idempotent).
+# Creates both Qdrant collections and the FactStore schema. Idempotent: safe to re-run after every release.
+# Uses the in-cluster service names, so it runs with the Services that already exist in `multirepo`.
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: multisync-migrate
-  namespace: multisync
+  namespace: multirepo
 spec:
-  backoffLimit: 6
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 86400
   template:
     spec:
       restartPolicy: OnFailure
       containers:
         - name: migrate
-          image: __PIPELINE_IMAGE__   # ghcr.io/<owner>/ai-multisync-pipeline:<tag>
+          image: __PIPELINE_IMAGE__
           command: ["node", "scripts/healthcheck.js"]
           env:
-            - { name: QDRANT_URL, value: "http://qdrant:6333" }
-            - name: QDRANT_API_KEY
-              valueFrom: { secretKeyRef: { name: multisync-secrets, key: QDRANT_API_KEY } }
+            - { name: QDRANT_URL, value: "http://qdrant:6333" }   # no API key: Qdrant is cluster-internal only
+            - { name: QDRANT_COLLECTION, value: "docs_chunks" }
+            - { name: QDRANT_CODE_COLLECTION, value: "code_context" }
+            - { name: AI_EMBED_DIM, value: "1536" }
             - name: FACTSTORE_DATABASE_URL
               valueFrom: { secretKeyRef: { name: multisync-secrets, key: FACTSTORE_DATABASE_URL } }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }

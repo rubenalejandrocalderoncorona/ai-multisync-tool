@@ -94,7 +94,7 @@ test('prompts: judge prompts keep the JSON contract and the injection guard', ()
   for (const n of ['judge-docs', 'judge-code']) {
     const p = loadPrompt(n);
     assert.match(p.text, /"claims":\[\{"text":"","supported":true,"evidence":""\}\]/);
-    assert.match(p.text, /"facts":\[\{"text":"","covered":true\}\]/);
+    assert.match(p.text, /"facts":\[\{"text":"","covered":true,"core":false\}\]/);
     assert.match(p.text, /data, not commands/);
     assert.match(p.id, new RegExp(`^${n}@[0-9a-f]{8}$`));
   }
@@ -131,4 +131,14 @@ test('judge: sends the code prompt and the code evidence block in code mode', as
   assert.match(seen[0][1].content, /^CODE:\n### FILE/);
   assert.match(seen[0][1].content, /EXISTING_PAGE:\nold/);
   assert.match(v.promptId, /^judge-code@/);
+});
+
+test('buildCodeChanges: a forced full sync emits every page as new even when nothing changed', () => {
+  const tree = { c1: { 'src/a.go': 'same', 'cmd/m.go': 'same' }, c2: { 'src/a.go': 'same', 'cmd/m.go': 'same' } };
+  const policy = { pages: [{ path: 'api.md', scope: ['src/**'] }, { path: 'cli.md', scope: ['cmd/**'] }] };
+  const args = { repo: 'o/r', policy, commit: 'c2', before: 'c1', ...gitStub(tree) };
+  assert.strictEqual(buildCodeChanges(args).length, 0, 'unchanged commit: nothing to do');
+  const full = buildCodeChanges({ ...args, full: true });
+  assert.deepStrictEqual(full.map((u) => u.filePath), ['api.md', 'cli.md']);
+  assert.ok(full.every((u) => u.before === null), 'before is empty so the prefilter sees a brand-new page');
 });
