@@ -19,7 +19,7 @@ function embedText(text, dim = 64) {
  * Records every call so tests can assert on cost (e.g. "no LLM call was made").
  */
 function fakeLLM({ judges = [], draft = '## Overview\n\nThe service exposes the alert API on port 8080 and supports three alert channels.\n\n## Configuration\n\nSet `ALERT_PORT` to change it.' } = {}) {
-  const calls = { chat: 0, judge: 0, embed: 0, drafts: [] };
+  const calls = { chat: 0, judge: 0, embed: 0, analyze: 0, plan: 0, drafts: [], analyzeInputs: [], planInputs: [] };
   let j = 0;
   return {
     calls,
@@ -34,7 +34,10 @@ function fakeLLM({ judges = [], draft = '## Overview\n\nThe service exposes the 
       calls.drafts.push(messages[1].content);
       return draft;
     },
-    async chatJson() {
+    async chatJson(messages) {
+      const sys = messages?.[0]?.content || '';
+      if (sys.includes('You are a code analyst')) { calls.analyze++; calls.analyzeInputs.push(messages[1].content); return CODE_FACTS; }
+      if (sys.includes('You are a documentation planner')) { calls.plan++; calls.planInputs.push(messages[1].content); return PLAN; }
       calls.judge++;
       const r = judges[Math.min(j, judges.length - 1)];
       j++;
@@ -43,6 +46,20 @@ function fakeLLM({ judges = [], draft = '## Overview\n\nThe service exposes the 
   };
 }
 
+const CODE_FACTS = {
+  summary: 'Alert service; the commit adds silencing and a configurable port.',
+  facts: [
+    { id: 'F1', text: 'The service listens on port 8081', evidence: 'src/a.go:5', kind: 'config', status: 'changed' },
+    { id: 'F2', text: 'Alerts can be silenced by id', evidence: 'src/a.go:3', kind: 'behavior', status: 'added' },
+    { id: 'F3', text: 'no evidence given', evidence: '', kind: 'other', status: 'added' },
+  ],
+  unclear: ['How silences expire'],
+};
+const PLAN = {
+  audience: 'Engineers integrating with the alert service', purpose: 'Explain delivery and configuration',
+  sections: [{ heading: 'Overview', action: 'update', must_cover: ['F1', 'F2', 'F99'], notes: '' }, { heading: 'Configuration', action: 'add', must_cover: ['F1'], notes: '' }],
+  terminology: [{ term: 'silence', use: 'silence' }], out_of_scope: ['billing'], gaps: ['How silences expire'],
+};
 const passJudge = { claims: [{ text: 'port is 8080', supported: true }], facts: [{ text: 'port 8080', covered: true }], style: 0.9, quality: 0.9, notes: [] };
 const hallucinationJudge = { claims: [{ text: 'supports gRPC', supported: false }, { text: 'port is 8080', supported: true }], facts: [{ text: 'port 8080', covered: true }], style: 0.9, quality: 0.9, notes: [] };
 
@@ -52,6 +69,7 @@ function makeDeps(overrides = {}) {
     cfg,
     llm: overrides.llm || fakeLLM({ judges: [passJudge] }),
     vectors: overrides.vectors || new MemoryVectorStore(),
+    codeVectors: overrides.codeVectors || new MemoryVectorStore(),
     facts: overrides.facts || new MemoryFactStore(),
     registry: overrides.registry || {},
     policy: { trust: 'review', serviceName: 'svc', styleGuide: '', glossary: {}, ...overrides.policy },
@@ -65,4 +83,4 @@ function makeDeps(overrides = {}) {
 const DOC_V1 = '## Overview\n\nAlert API.\n\n- email\n- slack\n';
 const DOC_V2 = '## Overview\n\nAlert API on port 8080.\n\n- email\n- slack\n- pagerduty\n\n## Configuration\n\nSet `ALERT_PORT`.\n';
 
-module.exports = { fakeLLM, makeDeps, passJudge, hallucinationJudge, embedText, DOC_V1, DOC_V2 };
+module.exports = { CODE_FACTS, PLAN, fakeLLM, makeDeps, passJudge, hallucinationJudge, embedText, DOC_V1, DOC_V2 };

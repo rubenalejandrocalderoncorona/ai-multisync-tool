@@ -1,0 +1,63 @@
+name: Deploy to cluster
+
+# Manual. Applies infra/k8s (migrate Job + in-cluster runner) to the k3s cluster on the VPS over SSH.
+# The databases already exist in the `multirepo` namespace; this does not touch them.
+#
+# Needs an Environment named `vps` (add required reviewers there for an approval gate) with:
+#   secrets: VPS_SSH_KEY (private key allowed to ssh as VPS_USER), VPS_KNOWN_HOSTS (output of `ssh-keyscan <host>`)
+#   variables: VPS_HOST, VPS_USER
+# The in-cluster Secret `multisync-secrets` is created by hand once (see infra/k8s/secrets.example.yaml); CI never sees it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Pipeline image tag to run the migrate job with (sha-xxxxxxx or latest)'
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-cluster
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: vps
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/ai-multysinc-pipeline
+      TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate tag
+        run: '[[ "$TAG" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid tag"; exit 1; }'
+      - name: Configure ssh
+        env:
+          KEY: ${{ secrets.VPS_SSH_KEY }}
+          KNOWN: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+      - name: Render manifests with the chosen image tag
+        run: |
+          cd infra/k8s
+          kubectl kustomize . | sed "s#__PIPELINE_IMAGE__#${IMAGE}:${TAG}#g" > /tmp/rendered.yaml
+          grep -c "kind:" /tmp/rendered.yaml
+      - name: Apply (server-side, no pruning)
+        env:
+          HOST: ${{ vars.VPS_HOST }}
+          USER_: ${{ vars.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes "$USER_@$HOST" 'sudo -n kubectl apply -f -' < /tmp/rendered.yaml
+      - name: Run the migrate job and wait for it
+        env:
+          HOST: ${{ vars.VPS_HOST }}
+          USER_: ${{ vars.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes "$USER_@$HOST" \
+            'sudo -n kubectl -n multirepo wait --for=condition=complete job/multisync-migrate --timeout=180s && sudo -n kubectl -n multirepo logs job/multisync-migrate'

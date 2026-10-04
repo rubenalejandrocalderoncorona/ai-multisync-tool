@@ -1,4 +1,7 @@
--- FactStore schema. Idempotent: safe to run on every start (compose init, k8s Job, `multisync migrate`).
+-- FactStore schema. Idempotent: safe to run on every start (compose init, k8s Job, scripts/healthcheck.js).
+-- Everything lives in its own schema so the app can share a database with other workloads safely.
+CREATE SCHEMA IF NOT EXISTS multisync;
+SET search_path TO multisync;
 
 CREATE TABLE IF NOT EXISTS claims (
   id         BIGSERIAL PRIMARY KEY,
@@ -44,3 +47,12 @@ CREATE TABLE IF NOT EXISTS node_logs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS node_logs_run_idx ON node_logs (run_id);
+
+-- What has been indexed into the vector store for each source repo. Drives incremental vs full re-index.
+CREATE TABLE IF NOT EXISTS context_state (
+  repo       TEXT PRIMARY KEY,
+  commit     TEXT        NOT NULL,   -- last commit fully reflected in the code index
+  files      INTEGER     NOT NULL,
+  chunks     INTEGER     NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

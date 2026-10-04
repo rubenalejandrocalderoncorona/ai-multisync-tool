@@ -34,6 +34,17 @@ A *shape* change (heading, code block, table row, list item, function or array e
 
 A grounded-but-awkward draft gets one **polish-only** pass (forbidden from touching facts) and is re-scored. Otherwise the findings are fed back into the next attempt. After `MAX_ITERATIONS`, **one automatic retry** runs with `TOP_K_WIDENED` context before escalating.
 
+### Two context stages (code mode)
+
+The vector database holds the whole repository before anything is analysed, in two collections: **code context** (every in-scope source file, chunked) and **semantic context** (approved pages, the repo's own docs, page briefs). A `sync_context` step runs first on every sync: the first run, or any run where the index is not exactly at the previous commit, loads the whole repo; otherwise only changed files are re-embedded.
+
+Then two separate LLM stages read that context:
+
+1. **`code_context` (stage 1):** sees the changed code, the repo map, and related code retrieved from the whole repo. It produces a fact sheet; every fact must cite its evidence.
+2. **`semantic_context` (stage 2):** sees the fact sheet, the page brief, the style rubric, the existing page and related docs. It produces a plan: sections, which facts each must cover, terminology, and the gaps the code cannot support.
+
+The writer follows the plan; the judge checks every claim against the code (including the related code) and checks coverage against the plan. A widened retry re-runs both stages with a bigger budget. Load a repo ahead of time with `npm run bootstrap -- --repo owner/name --dir <checkout>` or the **Bootstrap Context** workflow.
+
 ### Two modes
 
 | `mode` in `config/repos.json` | Source of truth | Typical repo |
@@ -110,15 +121,19 @@ npm run demo             # live: real LLM + embeddings, Qdrant, Postgres, cAIman
 
 Five scenarios, each printing its stage trail: first publish, near-duplicate (cosine short-circuit, no LLM), structural change (overrides similarity), cross-repo block (fallback + ticket, no LLM), and judge fallback (precision forced above 1.0, so the loop widens and escalates + ticket). The live demo needs the variables in `.env.example`; `SIMILARITY_HIGH` defaults to 0.85 there and must be calibrated against real embeddings.
 
+## CI/CD
+
+`.github/workflows/ci.yml` runs on every PR and push: unit and CLI tests, **integration tests against real Qdrant and Postgres service containers**, workflow lint (`actionlint`), compose and kustomize validation, a secret scan, an image build and smoke test; pushes to `main` publish `ghcr.io/<owner>/ai-multysinc-pipeline` with build provenance. `deploy-cluster.yml` (manual, behind an Environment approval) applies `infra/k8s` to the VPS cluster. Run the integration tests yourself with `QDRANT_URL=... FACTSTORE_DATABASE_URL=... npm run test:integration`; they use unique names and clean up, so they are safe to point at a shared instance.
+
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
 | `pipeline/` | the decision pipeline (config, llm, structure, prefilter, vectorstore, factstore, registry, writer, critic, fallback) |
-| `scripts/` | CLI entry points: `run_pipeline.js`, `index_approved.js`, `healthcheck.js`, `generate-summary.js`, `demo.js` |
+| `scripts/` | CLI entry points: `run_pipeline.js`, `bootstrap_context.js`, `index_approved.js`, `healthcheck.js`, `doctor.js`, `generate-summary.js`, `demo.js` |
 | `config/repos.json` | per-repo trust level, docs folder, style guide, glossary |
 | `config/feature-registry.json` | contract-point symbol → repos that must also ship |
-| `infra/` | docker-compose stack (VPS) and k8s kustomize base |
+| `infra/` | docker-compose stack, k8s manifests for the `multirepo` namespace (migrate Job, in-cluster runner) and a standalone variant |
 | `.github/workflows/` | source, central, and post-approval workflows |
 | `test/` | unit tests with a scripted LLM (no network) |
 
@@ -169,6 +184,10 @@ Add it to `config/repos.json` (start with `trust: review`), copy `sync-docs-sour
 ## Moving to Kubernetes
 
 `infra/k8s/` mirrors the compose stack: StatefulSets with PVCs, probes taken from the compose healthchecks, a `multisync-migrate` Job, and a Secret template. Everything is configured by environment variables, so the same `Dockerfile.pipeline` image runs as a Job or CronJob. Check it with `make k8s-render`.
+
+## Reliability
+
+The LLM client retries rate limits (429), server errors and network failures, honoring the server's own "try again in Ns" hint (`AI_MAX_RETRIES`, default 5). A stage that still fails raises a `pipeline_error` fallback; nothing is published. Large prompts on a low-tier OpenAI key can hit the tokens-per-minute limit: the retries absorb it, at the cost of a slower run.
 
 ## Tuning
 

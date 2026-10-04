@@ -22,14 +22,16 @@ function loadConfig(env = process.env) {
       fastModel: env.AI_FAST_MODEL || env.AI_MODEL || 'gpt-4o-mini',
       embedModel: env.AI_EMBED_MODEL || 'text-embedding-3-small',
       embedDim: num(env.AI_EMBED_DIM, 1536),
-      timeoutMs: num(env.AI_TIMEOUT_MS, 60000),
+      timeoutMs: num(env.AI_TIMEOUT_MS, 120000),
+      maxRetries: num(env.AI_MAX_RETRIES, 5),
     },
     qdrant: {
       // qdrant | memory (memory: local rehearsal and tests only; nothing persists)
       driver: env.VECTOR_DRIVER || 'qdrant',
       url: (env.QDRANT_URL || 'http://localhost:6333').replace(/\/$/, ''),
       apiKey: env.QDRANT_API_KEY || '',
-      collection: env.QDRANT_COLLECTION || 'docs_chunks',
+      collection: env.QDRANT_COLLECTION || 'docs_chunks',          // semantic context: approved pages, source docs, page briefs
+      codeCollection: env.QDRANT_CODE_COLLECTION || 'code_context', // code context: every in-scope source file, chunked
     },
     factstore: {
       // postgres | memory (memory is for tests and the no-infra demo only)
@@ -40,12 +42,16 @@ function loadConfig(env = process.env) {
       minDiffLines: num(env.MIN_DIFF_LINES, 3),
       similarityHigh: num(env.SIMILARITY_HIGH, 0.92),
       precisionMin: num(env.PRECISION_MIN, 0.9),
-      recallMin: num(env.RECALL_MIN, 0.8),
+      recallMin: num(env.RECALL_MIN, 0.85),
+      coreRecallMin: num(env.CORE_RECALL_MIN, 1),
       styleMin: num(env.STYLE_MIN, 0.7),
       judgeMin: num(env.JUDGE_MIN, 0.75),
       maxIterations: num(env.MAX_ITERATIONS, 3),
       topK: num(env.TOP_K, 5),
       topKWidened: num(env.TOP_K_WIDENED, 12),
+      codeTopK: num(env.CODE_TOP_K, 12),
+      codeTopKWidened: num(env.CODE_TOP_K_WIDENED, 30),
+      contextBudgetChars: num(env.CONTEXT_BUDGET_CHARS, 30000),
     },
     paths: {
       reposConfig: env.REPOS_CONFIG || 'config/repos.json',

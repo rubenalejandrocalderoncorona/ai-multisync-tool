@@ -46,6 +46,8 @@ jobs:
           AI_EMBED_DIM: ${{ vars.AI_EMBED_DIM || '1536' }}
           QDRANT_URL: ${{ vars.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'docs_chunks' }}
+          QDRANT_CODE_COLLECTION: ${{ vars.QDRANT_CODE_COLLECTION || 'code_context' }}
           FACTSTORE_DATABASE_URL: ${{ secrets.FACTSTORE_DATABASE_URL }}
         run: |
           mkdir -p /tmp/removed
@@ -56,4 +58,8 @@ jobs:
             mkdir -p "/tmp/removed/$(dirname "$f")"; git show "$BASE_SHA:$f" > "/tmp/removed/$f"
           done
           [ "${#CHANGED[@]}" -eq 0 ] || node .multisync/scripts/index_approved.js "${CHANGED[@]}"
-          [ "${#REMOVED[@]}" -eq 0 ] || node .multisync/scripts/index_approved.js --delete $(printf '/tmp/removed/%s ' "${REMOVED[@]}")
+          if [ "${#REMOVED[@]}" -gt 0 ]; then
+            GONE=()
+            for f in "${REMOVED[@]}"; do GONE+=("/tmp/removed/$f"); done
+            node .multisync/scripts/index_approved.js --delete "${GONE[@]}"
+          fi

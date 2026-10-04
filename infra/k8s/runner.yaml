@@ -1,0 +1,41 @@
+# Self-hosted GitHub Actions runner INSIDE the cluster. Why: Qdrant has no auth and Postgres is
+# cluster-internal, so neither can (or should) be reachable from GitHub's hosted runners. A runner pod in
+# `multirepo` reaches them by service name and needs no inbound port.
+#
+# Registers to ONE repository (the central docs repo). Workflows target it with `RUNNER_LABEL=multisync`.
+# Create the secret once, by hand (never commit it):
+#   kubectl -n multirepo create secret generic multisync-runner \
+#     --from-literal=ACCESS_TOKEN=<fine-grained PAT: Administration read/write on the central repo>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multisync-runner
+  namespace: multirepo
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: multisync-runner }
+  template:
+    metadata:
+      labels: { app: multisync-runner }
+    spec:
+      containers:
+        - name: runner
+          image: myoung34/github-runner:2.321.0   # pin a digest before relying on it in production
+          env:
+            - { name: REPO_URL, value: "https://github.com/rubenalejandrocalderoncorona/caimanlabs-portfolio-docs" }
+            - { name: RUNNER_NAME, value: "multisync-vps" }
+            - { name: RUNNER_SCOPE, value: "repo" }
+            - { name: LABELS, value: "multisync" }
+            - { name: EPHEMERAL, value: "false" }
+            - { name: RUNNER_WORKDIR, value: "/tmp/runner" }
+            # Make the in-cluster services the defaults for every job on this runner.
+            - { name: QDRANT_URL, value: "http://qdrant:6333" }
+            - name: ACCESS_TOKEN
+              valueFrom: { secretKeyRef: { name: multisync-runner, key: ACCESS_TOKEN } }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false

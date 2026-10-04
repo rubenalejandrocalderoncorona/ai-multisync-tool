@@ -6,6 +6,8 @@ Every LLM instruction the pipeline uses lives here, so reviewers can read and ch
 |---|---|---|
 | `judge-docs.md` | `judge` node, documentation mode | Fact-check a draft against its source doc |
 | `judge-code.md` | `judge` node, code mode | Fact-check a draft against a code snapshot |
+| `analyze-code.md` | `code_context` node (stage 1) | Whole-repo code analysis into an evidence-backed fact sheet |
+| `plan-docs.md` | `semantic_context` node (stage 2) | Decide what the page must contain, from the fact sheet plus the documentation index |
 | `draft-docs.md` | `write_draft` node | Restructure a source doc into a page (persona injected from the style library) |
 | `draft-code.md` | `write_draft` node | Write or update a page from code |
 | `gar.md` | `similarity` / `gar` nodes | Hypothetical paragraph used for retrieval; never indexed |

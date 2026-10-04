@@ -25,7 +25,7 @@ test('Qdrant: creates collection with cosine distance + payload indexes when mis
   const put = calls.find((c) => c.method === 'PUT' && c.url.endsWith('/collections/docs'));
   assert.deepStrictEqual(put.body, { vectors: { size: 1536, distance: 'Cosine' } });
   assert.strictEqual(put.headers['api-key'], 'k');
-  assert.strictEqual(calls.filter((c) => c.url.endsWith('/index')).length, 3);
+  assert.strictEqual(calls.filter((c) => c.url.endsWith('/index')).length, 4);
 });
 
 test('Qdrant: search scopes to repo and maps results', async () => {
@@ -101,4 +101,42 @@ test('repoPolicy: unknown repos default to review (never auto-publish)', () => {
   const p = repoPolicy({ defaults: { trust: 'review' }, repos: { 'o/trusted': { trust: 'auto' } } }, 'o/unknown');
   assert.strictEqual(p.trust, 'review');
   assert.strictEqual(repoPolicy({ defaults: {}, repos: { 'o/trusted': { trust: 'auto' } } }, 'o/trusted').trust, 'auto');
+});
+
+// ── LLM retries ──────────────────────────────────────────────────────────────
+const { retryDelayMs } = require('../pipeline/llm');
+const cfgAi = { baseUrl: 'http://x', chatPath: '/c', embedPath: '/e', apiKey: 'k', model: 'm', fastModel: 'f', embedModel: 'e', timeoutMs: 1000, maxRetries: 3 };
+const resp = (status, body, headers = {}) => ({ ok: status < 300, status, headers: { get: (k) => headers[k.toLowerCase()] }, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) });
+
+test('LLM retry: a 429 with "try again in 25.9s" waits that long (plus margin) then succeeds', async () => {
+  const waits = []; let n = 0;
+  const f = async () => (n++ < 2 ? resp(429, { error: { message: 'Rate limit reached. Please try again in 25.888s.' } }) : resp(200, { choices: [{ message: { content: 'ok' } }] }));
+  const llm = new LLM(cfgAi, f, async (ms) => waits.push(ms));
+  assert.strictEqual(await llm.chat([{ role: 'user', content: 'x' }]), 'ok');
+  assert.strictEqual(n, 3);
+  assert.deepStrictEqual(waits, [26638, 26638]);
+});
+
+test('LLM retry: honors Retry-After, backs off exponentially without a hint, and caps the wait', () => {
+  assert.strictEqual(retryDelayMs(resp(429, '', { 'retry-after': '7' }), '', 0), 7000);
+  assert.strictEqual(retryDelayMs(resp(500, ''), 'oops', 0), 1000);
+  assert.strictEqual(retryDelayMs(resp(500, ''), 'oops', 3), 8000);
+  assert.strictEqual(retryDelayMs(resp(500, ''), 'oops', 10), 30000);
+  assert.strictEqual(retryDelayMs(resp(429, ''), 'try again in 800ms', 0), 1550);
+  assert.strictEqual(retryDelayMs(resp(429, '', { 'retry-after': '9999' }), '', 0), 90000);
+});
+
+test('LLM retry: 5xx and network errors are retried; 400/401 are not; gives up after maxRetries', async () => {
+  let n = 0;
+  const flaky = async () => { n++; if (n === 1) throw new Error('fetch failed'); if (n === 2) return resp(503, 'unavailable'); return resp(200, { data: [{ index: 0, embedding: [1] }] }); };
+  assert.deepStrictEqual(await new LLM(cfgAi, flaky, async () => {}).embed(['a']), [[1]]);
+  assert.strictEqual(n, 3);
+
+  let bad = 0;
+  await assert.rejects(new LLM(cfgAi, async () => { bad++; return resp(401, 'nope'); }, async () => {}).chat([{ role: 'user', content: 'x' }]), /AI API 401/);
+  assert.strictEqual(bad, 1, 'a 401 is never retried');
+
+  let always = 0;
+  await assert.rejects(new LLM(cfgAi, async () => { always++; return resp(429, 'slow down'); }, async () => {}).chat([{ role: 'user', content: 'x' }]), /AI API 429/);
+  assert.strictEqual(always, 4, '1 try + 3 retries');
 });

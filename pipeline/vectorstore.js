@@ -10,10 +10,11 @@ const { cosine } = require('./llm');
  *   - Every point carries the source `commit`; a mismatch means the chunk is stale.
  */
 class QdrantStore {
-  constructor(cfg, dim, fetchImpl = globalThis.fetch) {
+  constructor(cfg, dim, fetchImpl = globalThis.fetch, collection = cfg.collection) {
     this.cfg = cfg;
     this.dim = dim;
     this.fetch = fetchImpl;
+    this.collection = collection;
   }
 
   async _req(method, path, body) {
@@ -33,29 +34,31 @@ class QdrantStore {
   }
 
   async ensureCollection() {
-    const c = this.cfg.collection;
+    const c = this.collection;
     const res = await this.fetch(`${this.cfg.url}/collections/${c}`, {
       headers: this.cfg.apiKey ? { 'api-key': this.cfg.apiKey } : {},
     });
     if (res.ok) return;
     await this._req('PUT', `/collections/${c}`, { vectors: { size: this.dim, distance: 'Cosine' } });
-    for (const field of ['repo', 'path', 'commit']) {
+    for (const field of ['repo', 'path', 'commit', 'kind']) {
       await this._req('PUT', `/collections/${c}/index`, { field_name: field, field_schema: 'keyword' });
     }
   }
 
   async upsert(points) {
     if (!points.length) return;
-    await this._req('PUT', `/collections/${this.cfg.collection}/points?wait=true`, { points });
+    await this._req('PUT', `/collections/${this.collection}/points?wait=true`, { points });
   }
 
   /** @returns {Promise<{id:string, score:number, payload:object}[]>} */
-  async search(vector, { limit = 5, repo, path: docPath } = {}) {
+  /** @param {{limit?:number, repo?:string, path?:string, kind?:string|string[]}} o */
+  async search(vector, { limit = 5, repo, path: docPath, kind } = {}) {
     const must = [];
     if (repo) must.push({ key: 'repo', match: { value: repo } });
     if (docPath) must.push({ key: 'path', match: { value: docPath } });
+    if (kind) must.push({ key: 'kind', match: Array.isArray(kind) ? { any: kind } : { value: kind } });
     const filter = must.length ? { must } : undefined;
-    const out = await this._req('POST', `/collections/${this.cfg.collection}/points/search`, {
+    const out = await this._req('POST', `/collections/${this.collection}/points/search`, {
       vector, limit, with_payload: true, filter,
     });
     return out.result.map((r) => ({ id: r.id, score: r.score, payload: r.payload }));
@@ -64,20 +67,26 @@ class QdrantStore {
   /** Anti-staleness: re-key unchanged chunks to the new commit without re-embedding. */
   async touchCommit(ids, commit) {
     if (!ids.length) return;
-    await this._req('POST', `/collections/${this.cfg.collection}/points/payload?wait=true`, {
+    await this._req('POST', `/collections/${this.collection}/points/payload?wait=true`, {
       payload: { commit, refreshed_at: new Date().toISOString() },
       points: ids,
     });
   }
 
   async deleteByPath(repo, filePath) {
-    await this._req('POST', `/collections/${this.cfg.collection}/points/delete?wait=true`, {
+    await this._req('POST', `/collections/${this.collection}/points/delete?wait=true`, {
       filter: { must: [{ key: 'repo', match: { value: repo } }, { key: 'path', match: { value: filePath } }] },
     });
   }
 
+  async deleteByRepo(repo, kind) {
+    const must = [{ key: 'repo', match: { value: repo } }];
+    if (kind) must.push({ key: 'kind', match: { value: kind } });
+    await this._req('POST', `/collections/${this.collection}/points/delete?wait=true`, { filter: { must } });
+  }
+
   async count(repo) {
-    const out = await this._req('POST', `/collections/${this.cfg.collection}/points/count`, {
+    const out = await this._req('POST', `/collections/${this.collection}/points/count`, {
       exact: true,
       filter: repo ? { must: [{ key: 'repo', match: { value: repo } }] } : undefined,
     });
@@ -91,9 +100,10 @@ class MemoryVectorStore {
   async health() { return true; }
   async ensureCollection() {}
   async upsert(points) { for (const p of points) this.points.set(p.id, p); }
-  async search(vector, { limit = 5, repo, path: docPath } = {}) {
+  async search(vector, { limit = 5, repo, path: docPath, kind } = {}) {
+    const kinds = kind ? [].concat(kind) : null;
     return [...this.points.values()]
-      .filter((p) => (!repo || p.payload.repo === repo) && (!docPath || p.payload.path === docPath))
+      .filter((p) => (!repo || p.payload.repo === repo) && (!docPath || p.payload.path === docPath) && (!kinds || kinds.includes(p.payload.kind)))
       .map((p) => ({ id: p.id, score: cosine(vector, p.vector), payload: p.payload }))
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
@@ -101,6 +111,9 @@ class MemoryVectorStore {
   async touchCommit(ids, commit) { for (const id of ids) { const p = this.points.get(id); if (p) p.payload.commit = commit; } }
   async deleteByPath(repo, filePath) {
     for (const [id, p] of this.points) if (p.payload.repo === repo && p.payload.path === filePath) this.points.delete(id);
+  }
+  async deleteByRepo(repo, kind) {
+    for (const [id, p] of this.points) if (p.payload.repo === repo && (!kind || p.payload.kind === kind)) this.points.delete(id);
   }
   async count(repo) { return [...this.points.values()].filter((p) => !repo || p.payload.repo === repo).length; }
 }
@@ -117,7 +130,7 @@ async function indexApproved({ store, llm, repo, filePath, content, commit }) {
   await store.upsert(chunks.map((c, i) => ({
     id: pointId(repo, filePath, i),
     vector: vectors[i],
-    payload: { repo, path: filePath, chunk: i, heading: c.heading, text: c.text, commit, approved_at: new Date().toISOString() },
+    payload: { repo, path: filePath, chunk: i, heading: c.heading, text: c.text, commit, kind: 'approved', approved_at: new Date().toISOString() },
   })));
   return chunks.length;
 }

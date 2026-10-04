@@ -45,13 +45,13 @@ async function main() {
   if (cfg.qdrant.driver === 'memory') add('Vector DB', 'VECTOR_DRIVER=memory', false, 'memory (nothing persists)', 'Rehearsal only');
   else {
     add('Vector DB', 'QDRANT_URL', true, has('QDRANT_URL') ? 'set' : 'MISSING (default http://localhost:6333)', 'URL of Qdrant on the VPS');
-    add('Vector DB', 'QDRANT_API_KEY', true, has('QDRANT_API_KEY') ? 'set' : 'MISSING', 'Same value as QDRANT__SERVICE__API_KEY on the VPS');
+    add('Vector DB', 'QDRANT_API_KEY', false, has('QDRANT_API_KEY') ? 'set' : 'not set (fine if Qdrant is cluster-internal without auth)', 'Only if your Qdrant requires an API key');
     if (!ENV_ONLY) {
       const q = await probe(async () => {
         const res = await fetch(`${cfg.qdrant.url}/collections`, { headers: cfg.qdrant.apiKey ? { 'api-key': cfg.qdrant.apiKey } : {}, signal: timeout(6000) });
         return { ok: res.ok, why: `HTTP ${res.status}` };
       });
-      add('Vector DB', 'Qdrant reachable + key accepted', true, q.ok ? 'ok' : `FAIL (${q.why})`, 'make stack-up on the VPS; check firewall/runner route');
+      add('Vector DB', `Qdrant reachable (${cfg.qdrant.collection} + ${cfg.qdrant.codeCollection})`, true, q.ok ? 'ok' : `FAIL (${q.why})`, 'In-cluster URL needs the in-cluster runner; from a laptop use an ssh tunnel');
     }
   }
 

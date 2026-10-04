@@ -9,7 +9,7 @@ name: Sync Documentation
 #   pending_review  trust=review opened as a PR for the technical writer; indexed only after merge
 #   fallback        never published: ticket + Slack alert, draft kept as a workflow artifact
 #
-# Required secrets: DOCS_SYNC_PAT, AI_API_KEY, QDRANT_API_KEY, FACTSTORE_DATABASE_URL, CAIMANDESK_API_TOKEN
+# Required secrets: DOCS_SYNC_PAT, AI_API_KEY, FACTSTORE_DATABASE_URL, CAIMANDESK_API_TOKEN (QDRANT_API_KEY only if your Qdrant has auth)
 # Required variables: QDRANT_URL, CAIMANDESK_PROJECT_ID
 # Tool pin: TOOL_REPO (default rubenalejandrocalderoncorona/ai-multysinc-tool), TOOL_REF (default main)
 # Optional variables: RUNNER_LABEL (e.g. a self-hosted runner on the VPS that can reach
@@ -91,7 +91,12 @@ jobs:
           path: .multisync
 
       - name: Switch to target branch
-        run: git fetch origin "$TARGET_BRANCH" 2>/dev/null && git checkout "$TARGET_BRANCH" || git checkout -b "$TARGET_BRANCH"
+        run: |
+          if git fetch origin "$TARGET_BRANCH" 2>/dev/null; then
+            git checkout "$TARGET_BRANCH"
+          else
+            git checkout -b "$TARGET_BRANCH"
+          fi
 
       - name: Checkout source repository
         uses: actions/checkout@v4
@@ -144,6 +149,8 @@ jobs:
           AI_EMBED_DIM: ${{ vars.AI_EMBED_DIM || '1536' }}
           QDRANT_URL: ${{ vars.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'docs_chunks' }}
+          QDRANT_CODE_COLLECTION: ${{ vars.QDRANT_CODE_COLLECTION || 'code_context' }}
           FACTSTORE_DATABASE_URL: ${{ secrets.FACTSTORE_DATABASE_URL }}
           TICKET_PROVIDER: ${{ vars.TICKET_PROVIDER || 'caimandesk' }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -152,7 +159,7 @@ jobs:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
           GITHUB_TOKEN: ${{ secrets.DOCS_SYNC_PAT }}
-          GITHUB_HOST: ${{ vars.GITHUB_HOST || 'github.com' }}
+          GIT_HOST: ${{ vars.GIT_HOST || 'github.com' }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           FULL_SYNC: ${{ github.event.inputs.full == 'true' && '1' || '' }}
           DOC_STYLES: ${{ github.workspace }}/config/doc-styles.json
@@ -190,9 +197,11 @@ jobs:
           git push -f origin "$BR"
           jq -r '"Source: `\(.repo)` @ `\(.commit[0:7])`\n\n| File | Precision | Recall | Style | Quality |\n|---|---|---|---|---|" , (.results[] | select(.outcome=="pending_review") | "| `\(.path)` | \(.metrics.final.precision) | \(.metrics.final.recall) | \(.metrics.final.style) | \(.metrics.final.quality) |")' pipeline-results.json > pr-body.md
           printf '\nMerging indexes this text into the vector store. Closing without merging leaves the index untouched.\n' >> pr-body.md
-          gh pr view "$BR" >/dev/null 2>&1 \
-            && gh pr edit "$BR" --body-file pr-body.md \
-            || gh pr create --base "$TARGET_BRANCH" --head "$BR" --title "docs: sync from ${SOURCE_REPO} (${SHORT})" --body-file pr-body.md
+          if gh pr view "$BR" >/dev/null 2>&1; then
+            gh pr edit "$BR" --body-file pr-body.md
+          else
+            gh pr create --base "$TARGET_BRANCH" --head "$BR" --title "docs: sync from ${SOURCE_REPO} (${SHORT})" --body-file pr-body.md
+          fi
 
       - name: Upload decision log and rejected drafts
         if: always()

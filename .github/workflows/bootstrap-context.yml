@@ -1,0 +1,79 @@
+name: Bootstrap Context
+
+# Load the WHOLE context of a source repository into the vector database BEFORE its first sync:
+#   code context     every in-scope source file, chunked, into the code collection
+#   semantic context its README/docs and the page briefs from config/repos.json, into the docs collection
+# A normal sync also self-heals the index, so this is for the first load, rebuilds and rehearsals.
+# Lives in the central docs repo and runs on the runner that can reach Qdrant and Postgres.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Source repository (owner/name)'
+        required: true
+      ref:
+        description: 'Branch, tag or SHA to load'
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bootstrap-${{ inputs.source_repo }}
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      SOURCE_REPO: ${{ inputs.source_repo }}
+      SOURCE_REF: ${{ inputs.ref }}
+    steps:
+      - name: Validate inputs
+        run: |
+          [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "invalid source repo"; exit 1; }
+          [[ "$SOURCE_REF" =~ ^[A-Za-z0-9_./-]+$ ]] || { echo "invalid ref"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - name: Checkout ai-multysinc-tool
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TOOL_REPO || 'rubenalejandrocalderoncorona/ai-multysinc-tool' }}
+          ref: ${{ vars.TOOL_REF || 'main' }}
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          path: .multisync
+
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          path: source-repo
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pipeline dependencies
+        working-directory: .multisync
+        run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+
+      - name: Load code + semantic context into the vector database
+        env:
+          INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL || 'https://api.openai.com' }}
+          AI_EMBED_MODEL: ${{ vars.AI_EMBED_MODEL || 'text-embedding-3-small' }}
+          AI_EMBED_DIM: ${{ vars.AI_EMBED_DIM || '1536' }}
+          QDRANT_URL: ${{ vars.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'docs_chunks' }}
+          QDRANT_CODE_COLLECTION: ${{ vars.QDRANT_CODE_COLLECTION || 'code_context' }}
+          FACTSTORE_DATABASE_URL: ${{ secrets.FACTSTORE_DATABASE_URL }}
+          REPOS_CONFIG: ${{ github.workspace }}/config/repos.json
+        run: node .multisync/scripts/bootstrap_context.js --repo "$SOURCE_REPO" --dir source-repo --full

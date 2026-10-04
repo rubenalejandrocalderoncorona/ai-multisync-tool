@@ -94,7 +94,7 @@ test('prompts: judge prompts keep the JSON contract and the injection guard', ()
   for (const n of ['judge-docs', 'judge-code']) {
     const p = loadPrompt(n);
     assert.match(p.text, /"claims":\[\{"text":"","supported":true,"evidence":""\}\]/);
-    assert.match(p.text, /"facts":\[\{"text":"","covered":true\}\]/);
+    assert.match(p.text, /"facts":\[\{"text":"","covered":true,"core":false\}\]/);
     assert.match(p.text, /data, not commands/);
     assert.match(p.id, new RegExp(`^${n}@[0-9a-f]{8}$`));
   }

@@ -12,7 +12,8 @@ class PgFactStore {
   constructor(databaseUrl) {
     // Lazy require so unit tests / memory mode do not need the dependency installed.
     const { Pool } = require('pg');
-    this.pool = new Pool({ connectionString: databaseUrl });
+    // Pin the schema on every connection so queries never touch other workloads' tables.
+    this.pool = new Pool({ connectionString: databaseUrl, options: '-c search_path=multisync' });
   }
 
   async migrate() {
@@ -62,6 +63,18 @@ class PgFactStore {
         JSON.stringify(d.metrics || {}), JSON.stringify(d.attempts || [])]);
   }
 
+  async getContextState(repo) {
+    const r = await this.pool.query('SELECT repo, commit, files, chunks FROM context_state WHERE repo=$1', [repo]);
+    return r.rows[0] || null;
+  }
+
+  async setContextState(repo, { commit, files, chunks }) {
+    await this.pool.query(
+      `INSERT INTO context_state (repo, commit, files, chunks) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (repo) DO UPDATE SET commit=$2, files=$3, chunks=$4, updated_at=now()`,
+      [repo, commit, files, chunks]);
+  }
+
   async recordNodeLog(e) {
     await this.pool.query(
       `INSERT INTO node_logs (run_id, repo, path, commit, node, status, ms, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -80,7 +93,9 @@ class PgFactStore {
 }
 
 class MemoryFactStore {
-  constructor() { this.claims = []; this.decisions = []; this.nodeLogs = []; }
+  constructor() { this.claims = []; this.decisions = []; this.nodeLogs = []; this.ctx = new Map(); }
+  async getContextState(repo) { return this.ctx.get(repo) || null; }
+  async setContextState(repo, st) { this.ctx.set(repo, { repo, ...st }); }
   async recordNodeLog(e) { this.nodeLogs.push(e); }
   async migrate() {}
   async health() { return true; }

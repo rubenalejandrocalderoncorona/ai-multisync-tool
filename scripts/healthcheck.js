@@ -6,7 +6,8 @@ const { buildDeps } = require('./lib');
 async function main() {
   const d = buildDeps();
   const checks = [
-    ['qdrant', async () => { await d.vectors.ensureCollection(); return d.vectors.health(); }],
+    ['qdrant (semantic collection)', async () => { await d.vectors.ensureCollection(); return d.vectors.health(); }],
+    ['qdrant (code collection)', async () => { await d.codeVectors.ensureCollection(); return d.codeVectors.health(); }],
     ['factstore', async () => { await d.facts.migrate(); return d.facts.health(); }],
   ];
   let ok = true;
