@@ -2,7 +2,7 @@
 
 Run `node scripts/doctor.js` at any time. It checks every item below (never printing a secret) and lists what is missing.
 
-See [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md) to connect a repository (worked example: CalendarScheduler into the production docs).
+See [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md) to connect a repository (worked example: CalendarScheduler into the QA and production documentation site).
 
 ## 1. Status
 
@@ -136,8 +136,9 @@ Every node writes a row to `multisync.node_logs` and a line to the runner log.
 | variable | `QDRANT_URL` | yes | `http://qdrant:6333` |
 | variable | `RUNNER_LABEL` | yes | `multisync` (the in-cluster runner) |
 | variable | `CAIMANDESK_PROJECT_ID` | yes | number in the cAImanDesk project URL |
-| variable | `CAIMANDESK_TRANSPORT`, `CAIMANDESK_MCP_URL` | no | `mcp` plus the in-cluster SSE URL once the MCP server is deployed (see [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md)); default is REST with the token |
-| variable | `REVIEW_ENVIRONMENT_NAME` | no | label shown in review tickets, default `QA` |
+| variable | `CAIMANDESK_TRANSPORT`, `CAIMANDESK_MCP_URL`, `CAIMANDESK_PUBLIC_URL` | no | default transport is `mcp` (Vikunja's built-in MCP, `<CAIMANDESK_URL>/api/v2/mcp`); set `CAIMANDESK_URL` to the in-cluster service and `CAIMANDESK_PUBLIC_URL` to the public address when running on the in-cluster runner |
+| variable | `REVIEW_ENVIRONMENT_NAME`, `QA_URL`, `QA_BRANCH`, `PROD_BRANCH` | no | defaults `QA`, `https://rubenalejandrocalderoncorona.org/documentation/qa/`, `qa`, `main` |
+| variable | `DEPLOY_ENABLED` | for deploys | `true` once `deploy/k8s.yaml` has been applied; until then the site deploy job is skipped |
 | variable | `AI_API_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL`, `AI_EMBED_MODEL`, `AI_EMBED_DIM` | no | defaults: OpenAI, `gpt-4o`, `gpt-4o-mini`, `text-embedding-3-small`, `1536` (`AI_EMBED_DIM` must match the embedding model) |
 | variable | `TOOL_REPO`, `TOOL_REF` | no | defaults: this repo, `main` |
 

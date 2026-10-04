@@ -5,14 +5,15 @@
  *
  *   open     after the PR is created: create (or update) the ticket, print JSON { ref, url, created, marker }
  *            env: PR_URL, RESULTS_FILE (default pipeline-results.json), ENVIRONMENT (default QA)
- *   approve  the PR was merged:                 env: PR_URL, PR_BODY
- *   reject   the PR was closed without merging: env: PR_URL, PR_BODY
+ *   qa       the docs PR was merged into the QA branch:   env: PR_URL, PR_BODY, QA_URL (ticket noted, stays open)
+ *   approve  the promotion PR was merged to production:   env: PR_URL, PR_BODY (every ticket in the body is closed)
+ *   reject   a PR was closed without merging:             env: PR_URL, PR_BODY (noted, stays open)
  *
  * The ticket is found again through a marker the workflow stores in the PR body: <!-- multisync:ticket=desk:42 -->
  */
 const fs = require('fs');
 const { loadConfig } = require('../pipeline/config');
-const { createTickets, ticketRefFromBody, ticketMarker } = require('../pipeline/tickets');
+const { createTickets, ticketRefsFromBody, ticketMarker } = require('../pipeline/tickets');
 
 async function main(action, env = process.env) {
   const cfg = loadConfig(env);
@@ -28,11 +29,13 @@ async function main(action, env = process.env) {
     return { ...t, marker: ticketMarker(t) };
   }
 
-  const ref = ticketRefFromBody(env.PR_BODY);
-  if (!ref) { console.error('no ticket marker in the PR body; nothing to update'); return { skipped: true }; }
-  if (action === 'approve') return { ok: await tickets.approve(ref, { prUrl }) };
-  if (action === 'reject') return { ok: await tickets.reject(ref, { prUrl }) };
-  throw new Error(`unknown action: ${action}`);
+  const refs = ticketRefsFromBody(env.PR_BODY);
+  if (!refs.length) { console.error('no ticket marker in the PR body; nothing to update'); return { skipped: true }; }
+  const verbs = { qa: (r) => tickets.qaDeployed(r, { prUrl, siteUrl: env.QA_URL }), approve: (r) => tickets.approve(r, { prUrl }), reject: (r) => tickets.reject(r, { prUrl }) };
+  if (!verbs[action]) throw new Error(`unknown action: ${action}`);
+  const done = [];
+  for (const r of refs) done.push({ id: r.id, ok: await verbs[action](r).catch((e) => { console.error(`ticket ${r.id}: ${e.message}`); return false; }) });
+  return { ok: done.every((x) => x.ok), tickets: done };
 }
 
 if (require.main === module) {

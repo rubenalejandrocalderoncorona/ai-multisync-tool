@@ -8,6 +8,7 @@ COPY pipeline ./pipeline
 COPY scripts ./scripts
 COPY infra/postgres ./infra/postgres
 COPY config ./config
+COPY prompts ./prompts
 COPY docs/templates ./docs/templates
 COPY .github/instructions ./.github/instructions
 USER node

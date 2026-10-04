@@ -1,108 +1,102 @@
 # Integrating a repository
 
-Worked example: `cAImanLabs/cAImanLabsCalendarScheduler` into the production documentation site.
+Worked example: `cAImanLabs/cAImanLabsCalendarScheduler` into the documentation site at
+`https://rubenalejandrocalderoncorona.org/documentation/` (production) and `/documentation/qa` (QA).
 
 ## 1. The flow
-
-Your flow, with the pipeline as a black box in the middle. Green is built and tested, amber is built but needs your input, red is missing.
 
 ```mermaid
 flowchart LR
   R["Repo<br/>cAImanLabsCalendarScheduler<br/>push to main"] --> SW["sync-docs.yml<br/>in that repo"]
   SW -->|"repository_dispatch"| BB
 
-  subgraph BB["BLACK BOX: central workflow in the documentation repo, on the in-cluster runner"]
+  subgraph BB["BLACK BOX: central workflow, on the in-cluster runner"]
     direction TB
     B1["sync_context: whole repo into Qdrant"] --> B2["code_context: LLM stage 1"]
     B2 --> B3["GAR: hypothetical docs from the facts"]
     B3 --> B4["semantic_context: LLM stage 2"]
-    B4 --> B5["write + LLM judge loop"]
+    B4 --> B5["write + LLM judge loop + coverage check"]
     B5 -->|"fails"| B6["fallback ticket"]
   end
 
-  BB -->|"passes"| PR["Pull request<br/>into the documentation repo"]
-  PR --> T["Review ticket<br/>tickets.caimanlabs.com.mx"]
-  T --> A{"Human approves<br/>= merges the PR"}
-  A -->|"merged"| IDX["Approved text indexed<br/>ticket closed"]
-  A -->|"closed unmerged"| N["Ticket noted, stays open"]
-  IDX --> BLD["main builds image<br/>to GHCR"]
-  BLD --> GATE["Mac mini approval<br/>sudo caiman-release"]
-  GATE --> PROD["Production docs site<br/>documentation.caimanlabs.com.mx"]
+  BB -->|"passes"| PR["Pull request into qa"]
+  PR --> T1["Review ticket opened<br/>tickets.caimanlabs.com.mx (MCP)"]
+  PR -->|"human merges"| QA["QA site deploys<br/>/documentation/qa"]
+  QA --> T2["Ticket noted: deployed to QA"]
+  QA --> PP["Promotion PR qa to main<br/>(one rolling PR, lists the tickets)"]
+  PP -->|"human merges"| PROD["Production site deploys<br/>/documentation/"]
+  PROD --> T3["Tickets closed: approved"]
 
   classDef have fill:#e1f5e1,stroke:#2e7d32,color:#14401a;
   classDef partial fill:#fff4d6,stroke:#b8860b,color:#6b4e00;
   classDef missing fill:#fde2e2,stroke:#c0392b,color:#7b1d12;
-  class R,SW,B1,B2,B3,B4,B5,B6,PR,IDX,N,BLD,GATE,PROD have;
-  class T partial;
+  class R,SW,B1,B2,B3,B4,B5,B6,PR,T1,T2,T3,PP have;
+  class QA,PROD partial;
 ```
 
-Everything in the black box and the ticket calls is built and tested. What is not in place yet is the wiring on your side (sections 3 to 5) and one decision about QA (section 7).
+Everything is built and tested except the live deployment of the two sites (amber): the workflow, image and manifests exist and were verified locally, but nothing has been applied to the cluster yet.
 
-## 2. Where the documentation repos are
-
-| | Production docs repo | Portfolio docs repo |
+| Step | Who | What happens |
 |---|---|---|
-| GitHub | `cAImanLabs/cAImanLabs-Documentation` | `rubenalejandrocalderoncorona/caimanlabs-portfolio-docs` |
-| On your machine | `/Users/racc/Documents/CodeProjects/cAImanLabs/cAImanLabs-Documentation` | `/Users/racc/Documents/CodeProjects/Portfolios-Demos/caimanlabs-portfolio-docs` |
-| Site | `documentation.caimanlabs.com.mx` | not deployed yet |
-| Production release | merge to `main`, image to GHCR, **Mac mini approval** (`sudo caiman-release`), K3s rollout | none yet |
-| Use it for | cAImanLabs products (CalendarScheduler, portals, pipelines) | your personal portfolio projects |
+| 1. Push | developer | CalendarScheduler `main` gets a commit |
+| 2. Black box | pipeline | drafts the pages, checks every claim against the code, checks completeness |
+| 3. PR into `qa` | pipeline | one PR per run; a review ticket is opened with the PR link and the judge scores |
+| 4. QA | reviewer | merges the PR; QA deploys at `/documentation/qa`; the ticket gets a note |
+| 5. Promotion | pipeline | a single rolling PR `qa` to `main` lists everything waiting, with its tickets |
+| 6. Production | you | merge the promotion PR; production deploys at `/documentation/`; tickets close |
 
-CalendarScheduler is a cAImanLabs product, so its central repo is the **production documentation repo**. Its working copy is currently on branch `codex/documentation-mcp-macmini`; I did not touch it.
+A PR closed without merging leaves its ticket open with a note; nothing is indexed.
 
-## 3. Add the action to the source repo (CalendarScheduler)
+## 2. Where things are
 
-1. Copy [`examples/calendarscheduler/sync-docs.yml`](../examples/calendarscheduler/sync-docs.yml) to `.github/workflows/sync-docs.yml` in `cAImanLabsCalendarScheduler`. It is already set to `CENTRAL_REPO: cAImanLabs/cAImanLabs-Documentation`, `TARGET_BRANCH: main`, `SYNC_MODE: code`.
-2. In that repo add the secret `DOCS_SYNC_PAT`: a fine-grained token with **resource owner = the `cAImanLabs` organization**, Contents + Pull requests + Workflows write on `cAImanLabs-Documentation`, and Contents read on `cAImanLabsCalendarScheduler`. (Both repos are in the same org, so one token works. For personal repos feeding the portfolio repo you need a second token owned by your user.)
-3. Commit it to `main`. It dispatches on every push; the black box decides whether anything is worth documenting.
+| | |
+|---|---|
+| Central repo (this site) | `rubenalejandrocalderoncorona/caimanlabs-portfolio-docs`, local `/Users/racc/Documents/CodeProjects/Portfolios-Demos/caimanlabs-portfolio-docs` |
+| Tool (pipeline code) | `rubenalejandrocalderoncorona/ai-multysinc-tool`, local `/Users/racc/Documents/CodeProjects/Portfolios-Demos/ai-multysinc-tool` |
+| Source repo | `cAImanLabs/cAImanLabsCalendarScheduler`, local `/Users/racc/Documents/CodeProjects/cAImanLabs/cAImanLabs-CalendarScheduler` |
+| Ticketing | `https://tickets.caimanlabs.com.mx` (Vikunja v2.5), MCP at `/api/v2/mcp` |
+| Hosting | Traefik on the VPS k3s cluster, namespace `personal`, same host as the portfolio |
 
-You do not need to add anything else to the source repo. It has no AI key and no knowledge of the pipeline.
+`cAImanLabs/cAImanLabs-Documentation` (`documentation.caimanlabs.com.mx`, Mac mini release gate) is a separate, older site and is not part of this flow.
 
-## 4. Prepare the documentation repo (once)
+## 3. Add the action to the source repo
 
-1. Copy these workflows from this tool into `cAImanLabs-Documentation/.github/workflows/`: `sync-docs-central.yml`, `sync-docs-approved.yml`, `bootstrap-context.yml`.
-2. Add the repo entry from [`examples/calendarscheduler/repos.entry.json`](../examples/calendarscheduler/repos.entry.json) to `config/repos.json` in that repo (create the file with `{ "defaults": {...}, "repos": { ... } }` if it does not exist; use `config/repos.json` in the portfolio repo as the shape). It declares three pages (overview, web-app architecture, data model) and excludes translations, migrations, the marketing site, the upstream `apps/docs` and agent files, so none of that is ever sent to a model.
-3. Add the **Projects** group to the sidebar: see [`examples/documentation-sidebar.md`](../examples/documentation-sidebar.md). Without it the pages exist but never appear in the menu, because that repo's sidebar is hand-written.
-4. Set the repo secrets and variables listed in [SETUP-REQUIRED.md](SETUP-REQUIRED.md) section 4. `TARGET_BRANCH` is `main` (set in the source workflow). The pipeline forces review whenever the target is `main`, so nothing is ever committed there directly; every change arrives as a pull request.
-5. Register a runner for this repo. The in-cluster runner in `infra/k8s/runner.yaml` is registered to **one** repository. For this org repo either deploy a second Deployment with `REPO_URL` set to it, or switch to an organization-level runner (`RUNNER_SCOPE=org`, `ORG_NAME=cAImanLabs`, token with org runner administration).
+1. Copy [`examples/calendarscheduler/sync-docs.yml`](../examples/calendarscheduler/sync-docs.yml) to `.github/workflows/sync-docs.yml` in CalendarScheduler. It is set to `CENTRAL_REPO: rubenalejandrocalderoncorona/caimanlabs-portfolio-docs`, `TARGET_BRANCH: qa`, `SYNC_MODE: code`.
+2. Add the secret `DOCS_SYNC_PAT` to that repo. The source is in the `cAImanLabs` organization and the central repo is under your user, and a fine-grained token has a single resource owner. Use a **classic token** with `repo` and `workflow` scopes, or a GitHub App. It dispatches to the central repo, which then reads CalendarScheduler with the same token.
+3. Commit to `main`. The source repo needs no AI key and no other configuration.
+
+## 4. Prepare the central repo (once)
+
+1. **Branches.** Create `qa` from `main`: `git push origin main:qa`. Protect both so only PRs change them.
+2. **Config.** `config/repos.json` already lists CalendarScheduler (three pages, glossary pinning the product name, and the `docs` globs that load its existing user guide as semantic context). Change it by PR.
+3. **Secrets and variables** on the repo (full list in [SETUP-REQUIRED.md](SETUP-REQUIRED.md)): `DOCS_SYNC_PAT`, `AI_API_KEY`, `FACTSTORE_DATABASE_URL`, `CAIMANDESK_API_TOKEN`; variables `QDRANT_URL=http://qdrant:6333`, `RUNNER_LABEL=multisync`, `CAIMANDESK_PROJECT_ID`.
+4. **The sites.** Apply `deploy/k8s.yaml` once (two Deployments, two Services, one Ingress with the two prefixes) and `infra/k8s/rbac-personal.yaml` from the tool (lets the in-cluster runner update only `docs-qa` and `docs-prod`). Make the GHCR package public, or create the `ghcr-pull` secret described in `deploy/k8s.yaml`. Then set the variable `DEPLOY_ENABLED=true`.
+5. **Runner.** Deploy `infra/k8s/runner.yaml` (registered to this repo).
 
 ## 5. First run
 
-1. Run **Bootstrap Context** in the documentation repo with `source_repo = cAImanLabs/cAImanLabsCalendarScheduler`. The log ends with the number of code chunks and semantic chunks now in Qdrant. For a repo this size (about 1,600 files) expect a few thousand chunks and a few cents of embeddings.
-2. Push any small change in CalendarScheduler (or run **Sync Documentation** manually with `full = true` to generate all three pages).
-3. Watch the run: each node prints its result. A pull request opens in the documentation repo, and a ticket appears in cAImanDesk with a link to it.
-4. Review and merge the PR. The ticket closes. The existing release path (image build, then the Mac mini approval) takes it to production.
+1. Run **Bootstrap Context** for `cAImanLabs/cAImanLabsCalendarScheduler` (loads the whole repo and your docs site pages into Qdrant). Check what was loaded: `node scripts/context_search.js --status`.
+2. Run **Sync Documentation** manually with `full = true`, or push a change. Each node prints its result, and the job summary lists the context retrieved.
+3. Merge the PR into `qa`: QA deploys. Merge the promotion PR: production deploys and the tickets close.
 
-## 6. Ticketing: facts you need to know
+## 6. Ticketing
 
-The ticket step works today over REST and is ready for the MCP. What I found:
+The ticket step uses **Vikunja's built-in MCP server** at `https://tickets.caimanlabs.com.mx/api/v2/mcp` (Streamable HTTP, Bearer API token). Inside the cluster the same server is `http://caiman-tickets.caimanlabs-operations.svc.cluster.local/api/v2/mcp`; set `CAIMANDESK_URL` to that and `CAIMANDESK_PUBLIC_URL` to the public address so links in tickets stay clickable.
 
-| Fact | Detail |
+| Setting | Value |
 |---|---|
-| The MCP server is **not deployed** | The cluster has no `vikunja-mcp` pod, service or ingress, and no `vikunja` namespace. The URLs `https://mcp-vikunja.caimanlabs.com.mx/sse` and `http://vikunja-mcp:8000/sse` do not exist yet (the hostname does not resolve) |
-| Its manifest does not match the cluster | Manifest: namespace `vikunja`, `VIKUNJA_URL=http://vikunja:3456/api/v1`, ingress class `nginx`. Cluster: tickets run as service `caiman-tickets` (port 80) in namespace `caimanlabs-operations`, ingress class `traefik` |
-| **It has no authentication** | Anyone who can reach port 8000 can call `delete_project`, `delete_task` and the other 31 tools. The manifest also publishes it through an ingress. Do not expose it publicly. Keep it ClusterIP-only |
-| It logs in with a shared user and password | The password has a default hardcoded in `mcp_server.py`. Prefer a Vikunja API token (`VIKUNJA_API_TOKEN`, which the server already supports) and rotate the default |
-| Tested | My client was run against your real server code over real SSE (create, list, get and update tasks), with a fake Vikunja behind it |
+| `CAIMANDESK_API_TOKEN` | the Vikunja API token (secret) |
+| `CAIMANDESK_PROJECT_ID` | the project that receives docs tickets (for example `3`, `cAImanLabs`) |
+| `CAIMANDESK_TRANSPORT` | `mcp` (default) or `rest` |
 
-To use the MCP: deploy it into `caimanlabs-operations` with `VIKUNJA_URL=http://caiman-tickets/api/v1` and a token, no ingress, then set on the documentation repo `CAIMANDESK_TRANSPORT=mcp` and `CAIMANDESK_MCP_URL=http://vikunja-mcp.caimanlabs-operations.svc.cluster.local:8000/sse` (reachable from the in-cluster runner). Until then, leave `CAIMANDESK_TRANSPORT` unset and provide `CAIMANDESK_API_TOKEN`; the behavior is identical.
-
-Ticket lifecycle:
+Tools used: `tasks_create`, `tasks_read_all` (duplicate check), `tasks_comments_create`, `tasks_update`. This path was run against your real instance: create, find, comment, close, then delete the test task.
 
 | Event | Ticket |
 |---|---|
-| A run fails (fallback) | `[docs-sync] <cause>: <repo> <page>` opened, or a note added if one is already open |
-| A review PR opens | `[docs-review] <repo> @ <sha>` opened with the PR link and the judge scores; the PR body carries a hidden marker so the ticket can be found again |
-| The PR is merged | note added, ticket closed |
-| The PR is closed unmerged | note added, ticket stays open |
+| A run fails | `[docs-sync] <cause>: <repo> <page>` opened, or a comment added if one is open |
+| A review PR opens | `[docs-review] <repo> @ <sha>` opened with the PR link and judge scores |
+| The PR is merged into QA | comment: deployed to QA (stays open) |
+| The promotion PR is merged | comment, ticket closed |
+| A PR is closed unmerged | comment (stays open) |
 
-## 7. One decision still open: what "QA" is
-
-Your production docs have no QA environment today: a PR is validated by CI, merging to `main` builds the image, and the Mac mini approval promotes it. So "PR in QA" can mean two different things:
-
-| Option | What it is | Cost |
-|---|---|---|
-| **A. The PR is the QA stage** (what this guide assumes) | The review PR targets `main`. The ticket tracks it. Merge = approval. The existing Mac mini approval is the production gate | nothing new to build |
-| **B. A real QA site** | PRs target a `qa` branch that deploys to its own site (for example `documentation-qa.caimanlabs.com.mx`); a second PR or an approval promotes `qa` to `main` | a second deployment and a promotion step |
-
-Option A is what is built. Option B needs a second site and a decision on who promotes.
+The Python MCP server in `/Users/racc/.gemini/antigravity/scratch/vikunja-mcp` is not deployed and is not needed. If you ever do deploy it: it has no authentication and exposes `delete_project`/`delete_task`, so keep it cluster-internal.

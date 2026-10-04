@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Minimal MCP client over SSE (what the cAImanDesk FastMCP server speaks). One short-lived connection
+ * Minimal MCP client (Streamable HTTP, or SSE for URLs ending in /sse). One short-lived connection
  * per batch of calls: connect, call tools, close. No state is kept between runs.
  */
 
@@ -19,15 +19,18 @@ function unwrap(result) {
 }
 
 /**
- * @param {string} url      SSE endpoint, e.g. http://vikunja-mcp.caimanlabs-operations.svc.cluster.local:8000/sse
+ * @param {string} url      MCP endpoint, e.g. https://tickets.caimanlabs.com.mx/api/v2/mcp
  * @param {(call:(name:string,args?:object)=>Promise<any>)=>Promise<T>} fn
  * @param {{headers?:object, timeoutMs?:number}} [opts]
  */
 async function withMcp(url, fn, { headers = {}, timeoutMs = 30000 } = {}) {
   const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
-  const { SSEClientTransport } = require('@modelcontextprotocol/sdk/client/sse.js');
   const hasHeaders = Object.keys(headers).length > 0;
-  const transport = new SSEClientTransport(new URL(url), hasHeaders ? { requestInit: { headers } } : undefined);
+  const init = hasHeaders ? { requestInit: { headers } } : undefined;
+  // Vikunja's built-in MCP speaks Streamable HTTP (…/api/v2/mcp); a URL ending in /sse selects the legacy SSE transport.
+  const transport = /\/sse\/?$/.test(url)
+    ? new (require('@modelcontextprotocol/sdk/client/sse.js').SSEClientTransport)(new URL(url), init)
+    : new (require('@modelcontextprotocol/sdk/client/streamableHttp.js').StreamableHTTPClientTransport)(new URL(url), init);
   const client = new Client({ name: 'ai-multisync-tool', version: '0.3.0' });
   // The SSE client reconnects in the background after a failed connect, which would keep the process alive
   // forever. Bound the connect and always close the transport on failure.

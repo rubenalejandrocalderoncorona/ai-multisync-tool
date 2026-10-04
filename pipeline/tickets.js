@@ -5,7 +5,7 @@
  *   events      openFallback(decision)        a run failed; a human must act
  *               openReview({...})             a docs PR is waiting in QA for review
  *               approve(ref) / reject(ref)    the PR was merged / closed unmerged
- *   transports  mcp   the cAImanDesk FastMCP server over SSE (tools create_task, update_task, list_tasks, get_task)
+ *   transports  mcp   Vikunja's built-in MCP server, /api/v2/mcp (tools tasks_create, tasks_read_all, tasks_update, tasks_comments_create)
  *               rest  the Vikunja REST API with an API token
  *
  * Both transports behave identically: duplicates are never opened for the same title, and
@@ -49,26 +49,25 @@ function restBackend(a, fetchImpl) {
   };
 }
 
-/** MCP: the same operations through the server's tools. It has no comment tool, so notes are appended to the description. */
+/** MCP: Vikunja's built-in server (/api/v2/mcp). Real comments and true partial updates, so it behaves exactly like REST. */
 function mcpBackend(a) {
-  const headers = a.deskMcpToken ? { Authorization: `Bearer ${a.deskMcpToken}` } : {};
+  const headers = a.deskToken ? { Authorization: `Bearer ${a.deskToken}` } : {};
   return {
     name: 'mcp',
     async run(fn) {
       return withMcp(a.deskMcpUrl, (call) => fn({
         async findOpen(projectId, title) {
-          const tasks = await call('list_tasks', { project_id: Number(projectId), filter: 'done = false' });
-          return (Array.isArray(tasks) ? tasks : []).find((t) => t.title === title) || null;
+          const tasks = await call('tasks_read_all', { project_id: Number(projectId), search: title, filter: 'done = false', per_page: 50 });
+          return (Array.isArray(tasks) ? tasks : []).find((t) => t.title === title && !t.done) || null;
         },
         async create(projectId, { title, description, priority }) {
-          return call('create_task', { project_id: Number(projectId), title, description, priority });
+          return call('tasks_create', { project_id: Number(projectId), title, description, priority });
         },
         async note(task, html) {
-          const cur = await call('get_task', { task_id: Number(task.id) });
-          await call('update_task', { task_id: Number(task.id), description: `${cur.description || ''}${html}` });
+          await call('tasks_comments_create', { task_id: Number(task.id), comment: html });
         },
         async setDone(task, done) {
-          await call('update_task', { task_id: Number(task.id), done });
+          await call('tasks_update', { id: Number(task.id), done });
         },
       }), { headers });
     },
@@ -76,9 +75,8 @@ function mcpBackend(a) {
 }
 
 function pickBackend(a, fetchImpl) {
-  const transport = a.deskTransport || (a.deskMcpUrl && !a.deskToken ? 'mcp' : 'rest');
-  if (transport === 'mcp') return a.deskMcpUrl && a.deskProjectId ? mcpBackend(a) : null;
-  return a.deskToken && a.deskProjectId ? restBackend(a, fetchImpl) : null;
+  if (!a.deskToken || !a.deskProjectId) return null;
+  return (a.deskTransport || 'mcp') === 'rest' ? restBackend(a, fetchImpl) : mcpBackend(a);
 }
 
 // ── bodies ────────────────────────────────────────────────────────────────────
@@ -105,7 +103,7 @@ function reviewHtml({ repo, commit, prUrl, items = [], environment = 'QA' }) {
 // ── service ───────────────────────────────────────────────────────────────────
 function createTickets(alerts, fetchImpl = globalThis.fetch) {
   const backend = pickBackend(alerts, fetchImpl);
-  const link = (t) => `${alerts.deskBaseUrl}/tasks/${t.id}`;
+  const link = (t) => `${alerts.deskPublicUrl || alerts.deskBaseUrl}/tasks/${t.id}`;
 
   /** Open a task, or add a note to the open one with the same title. Returns { id, url, created }. */
   async function openOrNote(title, html, priority, noteHtml) {
@@ -138,11 +136,20 @@ function createTickets(alerts, fetchImpl = globalThis.fetch) {
       return { ...r, ref: `desk:${r.id}` };
     },
 
+    /** The docs PR was merged into the QA branch: the page is live in QA, the ticket stays open until promotion. */
+    async qaDeployed(ref, { prUrl, siteUrl } = {}) {
+      if (!backend) return false;
+      return backend.run(async (b) => {
+        await b.note({ id: ref.id }, `<p><strong>Deployed to QA.</strong>${siteUrl ? ` Review it at <a href="${esc(siteUrl)}">${esc(siteUrl)}</a>.` : ''} Pull request merged: <a href="${esc(prUrl)}">${esc(prUrl)}</a>. It goes to production when the promotion pull request is merged.</p>`);
+        return true;
+      });
+    },
+
     async approve(ref, { prUrl } = {}) {
       if (!backend) return false;
       return backend.run(async (b) => {
         const t = { id: ref.id };
-        await b.note(t, `<p><strong>Approved.</strong> Pull request merged: <a href="${esc(prUrl)}">${esc(prUrl)}</a> (${new Date().toISOString().slice(0, 10)}).</p>`);
+        await b.note(t, `<p><strong>Approved for production.</strong> Pull request merged: <a href="${esc(prUrl)}">${esc(prUrl)}</a> (${new Date().toISOString().slice(0, 10)}).</p>`);
         await b.setDone(t, true);
         return true;
       });
@@ -163,6 +170,17 @@ function ticketRefFromBody(body) {
   const m = String(body || '').match(MARKER);
   return m ? { provider: m[1], id: Number(m[2]) } : null;
 }
+
+/** All distinct ticket references in a body: a promotion PR carries one marker per page batch it ships. */
+function ticketRefsFromBody(body) {
+  const seen = new Set();
+  const out = [];
+  for (const m of String(body || '').matchAll(new RegExp(MARKER.source, 'g'))) {
+    const key = `${m[1]}:${m[2]}`;
+    if (!seen.has(key)) { seen.add(key); out.push({ provider: m[1], id: Number(m[2]) }); }
+  }
+  return out;
+}
 const ticketMarker = (ref) => `<!-- multisync:ticket=${ref.ref || `desk:${ref.id}`} -->`;
 
-module.exports = { createTickets, ticketRefFromBody, ticketMarker, reviewHtml, fallbackHtml, pickBackend };
+module.exports = { createTickets, ticketRefFromBody, ticketRefsFromBody, ticketMarker, reviewHtml, fallbackHtml, pickBackend };

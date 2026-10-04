@@ -1,5 +1,5 @@
 {
-  "_about": "Key = documentation type. Value.prompt = the writer persona (fills {{PERSONA}} in prompts/draft-*.md). Value.rubric = what the judge scores 'style' against. Select a style per repo ('style') or per page ('kind') in repos.json; unknown keys fall back to defaultStyle. Add new keys freely.",
+  "_about": "Key = documentation type. Value.prompt = the writer persona (fills {{PERSONA}} in prompts/draft-*.md). Value.rubric = what the judge scores 'style' against. Select a style per repo ('style') or per page ('kind') in repos.json; unknown keys fall back to defaultStyle. Add new keys freely. Value.outline = the section skeleton used in code mode instead of a generic template; the writer deletes any section it has no facts for. Value.coverage = { kinds: [...], min } turns on a deterministic completeness check: every name of those kinds declared in the code must appear in the page (kinds: prisma_model, prisma_enum, sql_table, env_var, http_route, graphql_type).",
   "defaultStyle": "README / project overview",
   "styles": {
     "API documentation": {
@@ -9,6 +9,12 @@
         "Includes at least one request/response example in a fenced code block per resource when the source supports it",
         "Grouped by resource; consistent naming that matches the source exactly",
         "Neutral, imperative, no marketing language"
+      ],
+      "outline": [
+        "Overview",
+        "Authentication",
+        "Endpoints (one subsection per resource: method and path, parameters, response, errors, example)",
+        "Errors"
       ]
     },
     "README / project overview": {
@@ -18,6 +24,13 @@
         "Contains a runnable install/run section with commands in fenced code blocks when the source provides them",
         "Describes the main components or workflow at a high level without internal detail overload",
         "No unverifiable claims, no marketing adjectives"
+      ],
+      "outline": [
+        "What it is",
+        "How it works",
+        "Requirements and configuration",
+        "Run it",
+        "Where to go next"
       ]
     },
     "Architecture overview": {
@@ -27,6 +40,13 @@
         "Explains the flow between components in order",
         "States design decisions together with their rationale when the source shows it",
         "Diagram, when present, matches the text and uses only components that exist in the source"
+      ],
+      "outline": [
+        "Overview",
+        "Components (each with its responsibility)",
+        "How data and control flow",
+        "Design decisions and their reasons",
+        "Deployment and configuration"
       ]
     },
     "How-to guide": {
@@ -36,6 +56,12 @@
         "Numbered imperative steps, one action each, with exact commands or values",
         "Has a verification step and at most a short common-mistakes note",
         "No background theory beyond what the task needs"
+      ],
+      "outline": [
+        "Goal",
+        "Prerequisites",
+        "Steps",
+        "Verify it worked"
       ]
     },
     "Runbook / SOP": {
@@ -45,6 +71,14 @@
         "Numbered steps with exact commands and expected results",
         "Marks destructive steps and gives a rollback",
         "Includes escalation or ownership information only if the source provides it"
+      ],
+      "outline": [
+        "When to use this",
+        "Impact",
+        "Prerequisites and access",
+        "Steps",
+        "Rollback",
+        "Escalation"
       ]
     },
     "Configuration reference": {
@@ -54,7 +88,18 @@
         "Units and valid values given when the source states them",
         "Contains a minimal working example",
         "No guessed defaults or types"
-      ]
+      ],
+      "outline": [
+        "Overview",
+        "Settings (tables: name, type, default, required, description)",
+        "Example"
+      ],
+      "coverage": {
+        "kinds": [
+          "env_var"
+        ],
+        "min": 0.85
+      }
     },
     "Troubleshooting": {
       "prompt": "You are a support engineer writing a troubleshooting page. Organise by symptom, using the exact error text where the source gives it. For each symptom give the likely causes in order of probability, how to confirm each, and the fix. Keep each entry independent so a reader can jump straight to theirs.",
@@ -63,6 +108,9 @@
         "Each entry gives cause, how to confirm and the fix",
         "Entries are independent and scannable",
         "Does not invent causes the source does not support"
+      ],
+      "outline": [
+        "Symptoms (one subsection per error, with the exact message, cause and fix)"
       ]
     },
     "Tutorial": {
@@ -72,6 +120,12 @@
         "Small sequential steps each with a visible check",
         "Explains reasons at key points without lecturing",
         "Ends with next steps"
+      ],
+      "outline": [
+        "What you will build",
+        "Prerequisites",
+        "Steps (each ends with something visible)",
+        "Next steps"
       ]
     },
     "Release notes": {
@@ -81,6 +135,14 @@
         "Breaking changes are first and say what the user must do",
         "One line per item in user-facing terms",
         "No change listed that the source does not show"
+      ],
+      "outline": [
+        "Breaking changes",
+        "Added",
+        "Changed",
+        "Fixed",
+        "Removed",
+        "Security"
       ]
     },
     "Portfolio case study": {
@@ -90,6 +152,13 @@
         "Explains key technical decisions with reasons",
         "Lists the stack accurately",
         "Concrete and modest tone: no superlatives and no unsupported results"
+      ],
+      "outline": [
+        "The problem",
+        "What I built",
+        "Key technical decisions and why",
+        "Stack",
+        "Outcome and next steps"
       ]
     },
     "Data and schema reference": {
@@ -99,7 +168,22 @@
         "Relationships between entities are stated",
         "Names match the source exactly",
         "No fields or constraints the source does not define"
-      ]
+      ],
+      "outline": [
+        "Overview",
+        "Entities (one subsection per entity: purpose, fields with types and constraints, keys, relationships)",
+        "Enumerations",
+        "Relationships overview"
+      ],
+      "coverage": {
+        "kinds": [
+          "prisma_model",
+          "prisma_enum",
+          "sql_table",
+          "graphql_type"
+        ],
+        "min": 0.9
+      }
     }
   }
 }

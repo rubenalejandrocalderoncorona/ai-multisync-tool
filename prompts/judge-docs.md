@@ -13,6 +13,7 @@ Do these steps in order.
    - Numbers, versions, identifiers, paths, flags, URLs and commands must match exactly. A changed digit or renamed identifier is NOT supported.
    - A wrong or invented detail is unsupported even if it sounds plausible or is common knowledge.
    - Every URL or link target, version number, date, named external resource and troubleshooting statement in DRAFT is a claim. A link whose target is `#` or a placeholder, a link not present in the evidence, or an invented date is unsupported.
+   - Statements about the document itself ("this page covers...", "this document is intended for...", "for more information, see the repository") are not claims about the software: do not list them.
    - Do NOT count as claims: headings, template section titles, the "Change History" table and its metadata (date, version, author, completeness), table headers, transitions, and generic sentences that assert nothing checkable.
    - Quote the exact evidence in SOURCE for each supported claim (a short fragment). Leave evidence empty for unsupported ones.
 

@@ -68,6 +68,10 @@ class PgFactStore {
     return r.rows[0] || null;
   }
 
+  async listContextState() {
+    return (await this.pool.query('SELECT repo, commit, files, chunks, updated_at FROM context_state ORDER BY repo')).rows;
+  }
+
   async setContextState(repo, { commit, files, chunks }) {
     await this.pool.query(
       `INSERT INTO context_state (repo, commit, files, chunks) VALUES ($1,$2,$3,$4)
@@ -96,6 +100,7 @@ class MemoryFactStore {
   constructor() { this.claims = []; this.decisions = []; this.nodeLogs = []; this.ctx = new Map(); }
   async getContextState(repo) { return this.ctx.get(repo) || null; }
   async setContextState(repo, st) { this.ctx.set(repo, { repo, ...st }); }
+  async listContextState() { return [...this.ctx.values()]; }
   async recordNodeLog(e) { this.nodeLogs.push(e); }
   async migrate() {}
   async health() { return true; }

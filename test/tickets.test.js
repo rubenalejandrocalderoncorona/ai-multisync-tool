@@ -25,7 +25,7 @@ function restDesk(existing = []) {
   };
   return { f, calls, tasks };
 }
-const restCfg = { deskBaseUrl: 'https://tickets.example', deskToken: 't', deskProjectId: '7' };
+const restCfg = { deskBaseUrl: 'https://tickets.example', deskToken: 't', deskProjectId: '7', deskTransport: 'rest' };
 
 test('tickets (rest): openReview creates a [docs-review] task with the PR link and scores, and returns a ref', async () => {
   const { f, calls } = restDesk();
@@ -73,10 +73,10 @@ test('tickets: unconfigured means disabled and silent (no network call, null res
   assert.strictEqual(n, 0);
 });
 
-test('tickets: transport defaults to rest with a token, to mcp with only a URL, and is overridable', () => {
+test('tickets: mcp is the default transport, rest is opt-in, and links use the public URL', () => {
+  assert.strictEqual(createTickets({ deskBaseUrl: 'x', deskToken: 't', deskProjectId: '7', deskMcpUrl: 'http://m/api/v2/mcp' }).transport, 'mcp');
   assert.strictEqual(createTickets(restCfg).transport, 'rest');
-  assert.strictEqual(createTickets({ deskBaseUrl: 'x', deskProjectId: '7', deskMcpUrl: 'http://m/sse' }).transport, 'mcp');
-  assert.strictEqual(createTickets({ ...restCfg, deskMcpUrl: 'http://m/sse', deskTransport: 'mcp' }).transport, 'mcp');
+  assert.strictEqual(createTickets({ deskBaseUrl: 'x', deskToken: '', deskProjectId: '7' }).enabled, false, 'no token, no tickets');
 });
 
 test('PR body marker round-trips and tolerates surrounding text', () => {
@@ -102,70 +102,89 @@ test('unwrap: structuredContent, a single JSON text, and one-text-per-element li
   assert.throws(() => unwrap({ isError: true, content: [{ type: 'text', text: 'boom' }] }), /MCP tool error: boom/);
 });
 
-// ── MCP transport over REAL SSE, against an in-process MCP server mimicking the cAImanDesk tool signatures ──
-async function startFakeMcp() {
+// ── MCP transport over REAL Streamable HTTP, against an in-process server with Vikunja's native tool names ──
+async function startFakeMcp({ token = 'tok' } = {}) {
   const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
-  const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
+  const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
   const { z } = require('zod');
-  const tasks = new Map(); const log = [];
+  const tasks = new Map(); const comments = []; const log = [];
   const build = () => {
-    const s = new McpServer({ name: 'fake-vikunja-mcp', version: '1' });
+    const s = new McpServer({ name: 'vikunja', version: 'v2.5.0' });
     const out = (v) => ({ content: [{ type: 'text', text: JSON.stringify(v) }] });
-    s.registerTool('list_tasks', { inputSchema: { project_id: z.number().optional(), filter: z.string().optional() } }, async (a) => { log.push(['list_tasks', a]); return out([...tasks.values()].filter((t) => !t.done)); });
-    s.registerTool('create_task', { inputSchema: { project_id: z.number(), title: z.string(), description: z.string().optional(), priority: z.number().optional() } }, async (a) => { log.push(['create_task', a]); const t = { id: tasks.size + 100, done: false, description: '', ...a }; tasks.set(t.id, t); return out(t); });
-    s.registerTool('get_task', { inputSchema: { task_id: z.number() } }, async (a) => { log.push(['get_task', a]); return out(tasks.get(a.task_id)); });
-    s.registerTool('update_task', { inputSchema: { task_id: z.number(), description: z.string().optional(), done: z.boolean().optional() } }, async ({ task_id, ...c }) => { log.push(['update_task', { task_id, ...c }]); tasks.set(task_id, { ...tasks.get(task_id), ...c }); return out(tasks.get(task_id)); });
+    s.registerTool('tasks_read_all', { inputSchema: { project_id: z.number().optional(), search: z.string().optional(), filter: z.string().optional(), per_page: z.number().optional() } }, async (a) => { log.push(['tasks_read_all', a]); return out([...tasks.values()].filter((t) => (!a.search || t.title.toLowerCase().includes(a.search.toLowerCase())) && !(a.filter === 'done = false' && t.done))); });
+    s.registerTool('tasks_create', { inputSchema: { project_id: z.number(), title: z.string(), description: z.string().optional(), priority: z.number().optional() } }, async (a) => { log.push(['tasks_create', a]); const t = { id: tasks.size + 100, done: false, ...a }; tasks.set(t.id, t); return out(t); });
+    s.registerTool('tasks_comments_create', { inputSchema: { task_id: z.number(), comment: z.string() } }, async (a) => { log.push(['tasks_comments_create', a]); comments.push(a); return out({ id: comments.length, ...a }); });
+    s.registerTool('tasks_update', { inputSchema: { id: z.number(), done: z.boolean().optional(), description: z.string().optional() } }, async ({ id, ...c }) => { log.push(['tasks_update', { id, ...c }]); tasks.set(id, { ...tasks.get(id), ...c }); return out(tasks.get(id)); });
     return s;
   };
-  const sessions = new Map();
   const server = http.createServer(async (req, res) => {
-    if (req.method === 'GET' && req.url === '/sse') {
-      const transport = new SSEServerTransport('/messages', res);
-      sessions.set(transport.sessionId, transport);
-      res.on('close', () => sessions.delete(transport.sessionId));
-      await build().connect(transport);
-    } else if (req.method === 'POST' && req.url.startsWith('/messages')) {
-      const sid = new URL(req.url, 'http://x').searchParams.get('sessionId');
-      await sessions.get(sid)?.handlePostMessage(req, res);
-    } else { res.statusCode = 404; res.end(); }
+    if (req.url !== '/api/v2/mcp') { res.statusCode = 404; return res.end(); }
+    if (req.headers.authorization !== `Bearer ${token}`) { res.statusCode = 401; return res.end('unauthorized'); }
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
+    const mcp = build(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => { transport.close(); mcp.close(); });
+    await mcp.connect(transport);
+    await transport.handleRequest(req, res, body);
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  return { url: `http://127.0.0.1:${server.address().port}/sse`, tasks, log, close: () => { server.closeAllConnections?.(); server.close(); } };
+  return { url: `http://127.0.0.1:${server.address().port}/api/v2/mcp`, tasks, comments, log, close: () => { server.closeAllConnections?.(); server.close(); } };
 }
-const mcpCfg = (url) => ({ deskBaseUrl: 'https://tickets.example', deskProjectId: '7', deskMcpUrl: url, deskTransport: 'mcp' });
+const mcpCfg = (url, token = 'tok') => ({ deskBaseUrl: 'https://tickets.example', deskToken: token, deskProjectId: '7', deskMcpUrl: url, deskTransport: 'mcp' });
 
-test('tickets (mcp, real SSE): review opens, repeats note via the description, approve closes the task', async () => {
+test('tickets (mcp, real Streamable HTTP): review opens, a repeat adds a real comment, approve comments and closes', async () => {
   const m = await startFakeMcp();
   try {
     const t = createTickets(mcpCfg(m.url));
     const first = await t.openReview(review);
     assert.strictEqual(first.created, true);
     assert.strictEqual(first.url, `https://tickets.example/tasks/${first.id}`);
-    assert.strictEqual(m.log.find((l) => l[0] === 'create_task')[1].project_id, 7, 'project id is a number, as the tool requires');
+    assert.strictEqual(m.log.find((l) => l[0] === 'tasks_create')[1].project_id, 7, 'project id is a number, as the tool requires');
     assert.match(m.tasks.get(first.id).description, /pull\/7/);
 
     const again = await t.openReview(review);
     assert.strictEqual(again.id, first.id, 'no duplicate task');
     assert.strictEqual(again.created, false);
-    assert.match(m.tasks.get(first.id).description, /Pull request updated/);
-    assert.match(m.tasks.get(first.id).description, /pull\/7/, 'the original description is preserved when a note is appended');
+    assert.match(m.comments.at(-1).comment, /Pull request updated/);
 
     await t.approve({ id: first.id }, { prUrl: 'https://github.com/o/docs/pull/7' });
     assert.strictEqual(m.tasks.get(first.id).done, true);
-    assert.match(m.tasks.get(first.id).description, /Approved\./);
+    assert.match(m.comments.at(-1).comment, /Approved for production/);
     // a closed task no longer blocks a new ticket for the same title
-    const reopened = await t.openReview(review);
-    assert.notStrictEqual(reopened.id, first.id);
+    assert.notStrictEqual((await t.openReview(review)).id, first.id);
   } finally { m.close(); }
 });
 
-test('tickets (mcp, real SSE): fallback tickets work and a down server returns null (never breaks a run)', async () => {
+test('tickets (mcp): the API token is sent as a Bearer header; a wrong token yields no ticket and never throws', async () => {
+  const m = await startFakeMcp({ token: 'right' });
+  try {
+    assert.ok(await createTickets(mcpCfg(m.url, 'right')).openReview(review));
+    const { escalate } = require('../pipeline/fallback');
+    assert.strictEqual(await escalate({ repo: 'o/r', path: 'a.md', rootCauseTag: 'x', attempts: [] }, { ticketProvider: 'caimandesk', ...mcpCfg(m.url, 'wrong') }, async () => ({ ok: true })), null);
+  } finally { m.close(); }
+});
+
+test('tickets (mcp): fallback tickets work, and an unreachable server returns null without hanging the process', async () => {
   const m = await startFakeMcp();
   try {
-    const url = await createTickets(mcpCfg(m.url)).openFallback({ repo: 'o/r', path: 'a.md', commit: 'c1', reviewerAction: 'auto_rejected', rootCauseTag: 'iteration_cap_exceeded', reason: 'x', attempts: [], feedback: ['f'], draft: '# d' });
-    assert.match(url, /tasks\/\d+$/);
+    assert.match(await createTickets(mcpCfg(m.url)).openFallback({ repo: 'o/r', path: 'a.md', commit: 'c1', reviewerAction: 'auto_rejected', rootCauseTag: 'iteration_cap_exceeded', reason: 'x', attempts: [], feedback: ['f'], draft: '# d' }), /tasks\/\d+$/);
   } finally { m.close(); }
   const { escalate } = require('../pipeline/fallback');
-  const down = await escalate({ repo: 'o/r', path: 'a.md', rootCauseTag: 'x', attempts: [] }, { ticketProvider: 'caimandesk', ...mcpCfg('http://127.0.0.1:9/sse') }, async () => ({ ok: true }));
-  assert.strictEqual(down, null);
+  assert.strictEqual(await escalate({ repo: 'o/r', path: 'a.md', rootCauseTag: 'x', attempts: [] }, { ticketProvider: 'caimandesk', ...mcpCfg('http://127.0.0.1:9/api/v2/mcp') }, async () => ({ ok: true })), null);
+});
+
+test('ticketRefsFromBody: a promotion PR carries one marker per batch; duplicates collapse', () => {
+  const body = 'Promote\n<!-- multisync:ticket=desk:42 -->\n- a\n<!-- multisync:ticket=desk:43 -->\n<!-- multisync:ticket=desk:42 -->';
+  const { ticketRefsFromBody } = require('../pipeline/tickets');
+  assert.deepStrictEqual(ticketRefsFromBody(body), [{ provider: 'desk', id: 42 }, { provider: 'desk', id: 43 }]);
+  assert.deepStrictEqual(ticketRefsFromBody('none'), []);
+});
+
+test('tickets: QA deploy only notes the ticket (it stays open); production approval closes it', async () => {
+  const { f, tasks } = restDesk([{ id: 5, title: 'x', done: false, priority: 2 }]);
+  const t = createTickets(restCfg, f);
+  await t.qaDeployed({ id: 5 }, { prUrl: 'https://github.com/o/docs/pull/7', siteUrl: 'https://example.org/documentation/qa/' });
+  assert.strictEqual(tasks.get(5).done, false);
+  await t.approve({ id: 5 }, { prUrl: 'https://github.com/o/docs/pull/8' });
+  assert.strictEqual(tasks.get(5).done, true);
 });

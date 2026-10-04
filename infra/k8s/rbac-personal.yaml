@@ -1,0 +1,37 @@
+# Lets the in-cluster runner roll out the documentation sites, and nothing else.
+# Scope: only the two Deployments docs-qa and docs-prod in the `personal` namespace (get/patch/update, read status).
+# It cannot read secrets, create resources, or touch any other namespace.
+#
+# Apply SEPARATELY, not through the kustomization: kustomize's `namespace: multirepo` would rewrite these two objects out
+# of `personal` and silently grant nothing. The ServiceAccount itself lives in runner.yaml.
+#   kubectl apply -f infra/k8s/rbac-personal.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: docs-deployer
+  namespace: personal
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["docs-qa", "docs-prod"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/status", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: docs-deployer
+  namespace: personal
+subjects:
+  - kind: ServiceAccount
+    name: multisync-runner
+    namespace: multirepo
+roleRef:
+  kind: Role
+  name: docs-deployer
+  apiGroup: rbac.authorization.k8s.io

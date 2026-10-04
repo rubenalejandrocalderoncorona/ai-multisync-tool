@@ -81,6 +81,7 @@ const pagesScope = (pages = []) => (pages.length && pages.every((p) => p.scope?.
  * @returns {object[]} change units (kind: 'code'); pages whose files did not change are omitted
  */
 function buildCodeChanges({ repo, policy, commit, before, listFiles, readAt, changedBetween, readExistingPage, full = false }) {
+  if (full) before = ''; // a forced full sync treats every page as new, so the prefilter cannot call it "no change"
   const pages = policy.pages?.length ? policy.pages : [{ path: 'overview.md', kind: policy.style }];
   const afterFiles = listFiles(commit);
   const beforeFiles = before ? listFiles(before) : [];

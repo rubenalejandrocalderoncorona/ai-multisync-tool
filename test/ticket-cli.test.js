@@ -27,8 +27,8 @@ function fakeVikunjaRest() {
         if (req.method === 'GET') return send([...tasks.values()]);
         const t = { id: tasks.size + 1, done: false, comments: [], ...j }; tasks.set(t.id, t); return send(t);
       }
-      if ((m = u.pathname.match(/\/tasks\/(\d+)\/comments$/))) { tasks.get(Number(m[1])).comments.push(j.comment); return send({}); }
-      if ((m = u.pathname.match(/\/tasks\/(\d+)$/))) { const t = tasks.get(Number(m[1])); if (req.method === 'POST') Object.assign(t, j); return send(t); }
+      if ((m = u.pathname.match(/\/tasks\/(\d+)\/comments$/))) { const t = tasks.get(Number(m[1])); if (!t) { res.statusCode = 404; return res.end('{}'); } t.comments.push(j.comment); return send({}); }
+      if ((m = u.pathname.match(/\/tasks\/(\d+)$/))) { const t = tasks.get(Number(m[1])); if (!t) { res.statusCode = 404; return res.end('{}'); } if (req.method === 'POST') Object.assign(t, j); return send(t); }
       res.statusCode = 404; res.end('{}');
     });
   });
@@ -59,6 +59,13 @@ test('review ticket CLI: open -> marker; approve closes the task; reject leaves 
     assert.strictEqual(t.done, false, 'closed-unmerged keeps the ticket open');
     assert.match(t.comments.at(-1), /Not approved/);
 
+    // QA deploy: noted, still open; one promotion PR can carry several tickets
+    const qa = await run(['qa'], { cwd: dir, env: { ...base, PR_URL: 'https://github.com/o/docs/pull/9', QA_URL: 'https://example.org/documentation/qa/', PR_BODY: `x\n${o.marker}\n<!-- multisync:ticket=desk:999 -->` } });
+    assert.strictEqual(qa.code, 0);
+    assert.match(t.comments.at(-1), /Deployed to QA/);
+    assert.match(t.comments.at(-1), /documentation\/qa/);
+    assert.strictEqual(t.done, false);
+
     const approved = await run(['approve'], { cwd: dir, env: { ...base, PR_URL: 'https://github.com/o/docs/pull/9', PR_BODY: `intro\n${o.marker}` } });
     assert.strictEqual(JSON.parse(approved.out).ok, true);
     assert.strictEqual(t.done, true);
@@ -70,7 +77,7 @@ test('review ticket CLI: open -> marker; approve closes the task; reject leaves 
 
     const dead = await run(['approve'], { cwd: dir, env: { ...base, CAIMANDESK_URL: 'http://127.0.0.1:9', PR_URL: 'u', PR_BODY: o.marker } });
     assert.strictEqual(dead.code, 0, 'a dead ticket system must not fail the workflow');
-    assert.strictEqual(JSON.parse(dead.out).skipped, true);
+    assert.strictEqual(JSON.parse(dead.out).ok, false);
 
     const unconfigured = await run(['open'], { cwd: dir, env: { ...process.env, CAIMANDESK_API_TOKEN: '', CAIMANDESK_PROJECT_ID: '', CAIMANDESK_MCP_URL: '', PR_URL: 'u' } });
     assert.strictEqual(unconfigured.code, 0);

@@ -13,8 +13,8 @@ name: Sync Documentation to Central Repo
 # ============================================================
 
 env:
-  CENTRAL_REPO: 'cAImanLabs/cAImanLabs-Documentation'    # <- the production documentation repo
-  TARGET_BRANCH: 'main'                             # <- branch in the central repo the docs PR targets ('main' = production branch; PRs only, never direct commits)
+  CENTRAL_REPO: 'rubenalejandrocalderoncorona/caimanlabs-portfolio-docs'   # <- the central documentation repo
+  TARGET_BRANCH: 'qa'                               # <- branch the docs PR targets: 'qa' = reviewed in QA, then promoted to main (production)
   SYNC_MODE: 'code'                                 # <- docs | code | both  (must match `mode` in the central config/repos.json)
 
 on:

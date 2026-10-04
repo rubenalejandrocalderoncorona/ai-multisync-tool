@@ -45,6 +45,20 @@ Then two separate LLM stages read that context:
 
 The writer follows the plan; the judge checks every claim against the code (including the related code) and checks coverage against the plan. A widened retry re-runs both stages with a bigger budget. Load a repo ahead of time with `npm run bootstrap -- --repo owner/name --dir <checkout>` or the **Bootstrap Context** workflow.
 
+### Seeing and checking the context
+
+```bash
+node scripts/context_search.js --status                                            # what is loaded, per repo and kind
+node scripts/context_search.js --repo owner/name --query "how are polls created"   # what a code/semantic query retrieves
+node scripts/context_search.js --repo owner/name --gar "Participants pick the times that work for them."   # GAR-style query
+```
+
+- **Semantic sources.** Besides the repo's README and `docs/`, a repo can list extra existing documentation in `docs` globs (for example an end-user docs app), and the pages of the central documentation site itself are indexed as `site_doc` (`SITE_REPO` + `SITE_DIR`, or `bootstrap_context.js --site-dir`). Everything is searched with the GAR paragraphs.
+- **Relevance floor.** Retrieved chunks below `CONTEXT_MIN_SCORE` (0.45) are dropped; the page brief is always kept. This stops marginal matches (for example an upstream project's troubleshooting text) leaking into a page.
+- **What the run used.** Each decision records the GAR queries, the facts found, the code and semantic chunks retrieved with their scores, and how many of the in-scope files the page was based on. The job summary prints it, so a wrong `scope` is visible in review.
+- **Deterministic completeness.** Styles for which completeness is the point (`Data and schema reference`, `Configuration reference`) carry a `coverage` rule: every model, enum, table or environment variable declared in the code must appear in the page, or the draft fails with the exact missing names. The LLM judge cannot do this reliably, because it only checks completeness against the facts it chose to list.
+- **Regenerating one page.** `ONLY_PAGES=data-model.md FULL_SYNC=1` regenerates just those pages while the whole config's context stays loaded.
+
 ### Two modes
 
 | `mode` in `config/repos.json` | Source of truth | Typical repo |

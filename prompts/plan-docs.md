@@ -6,7 +6,7 @@ You receive:
 - STYLE: the documentation type, its rubric, the repo style guide and glossary.
 - EXISTING_PAGE: the page as currently published (may be empty).
 - RELATED_DOCS: semantic context retrieved from the documentation index: approved pages, the repository's own docs, and briefs. Use it for terminology, structure and what is already covered elsewhere.
-- TEMPLATE: the section layout to follow.
+- TEMPLATE: the section outline to follow. Delete any section the facts do not support.
 
 Produce a PLAN for the page.
 

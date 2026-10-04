@@ -12,6 +12,7 @@
  *   SOURCE_BEFORE   previous commit (default: SOURCE_SHA~1)
  *   SOURCE_DIR      checkout dir (default: source-repo)
  *   FULL_SYNC       1 = (code mode) regenerate every declared page from the whole repo
+ *   ONLY_PAGES      comma list of page paths to regenerate (context is still loaded for every declared page)
  *   RUN_ID          correlation id (default: random)
  *   + AI_*, QDRANT_*, FACTSTORE_DATABASE_URL, see pipeline/config.js
  *
@@ -29,7 +30,8 @@ const { buildCodeChanges } = require('../pipeline/codesource');
 const { buildDeps, applyDecision } = require('./lib');
 
 const G = require('./gitutil');
-const { syncContext } = require('../pipeline/context');
+const { syncContext, syncSite } = require('../pipeline/context');
+const { siteFiles, siteCommit, readSiteFile } = require('./sitedocs');
 const { pagesScope } = require('../pipeline/codesource');
 
 async function main() {
@@ -77,6 +79,19 @@ async function main() {
 
   // CONTEXT STAGE: the vector DB must hold the whole repository before any change is analysed.
   // If it cannot be loaded, code-mode changes fall back (ticket, nothing published) instead of the run crashing.
+  // The rest of the documentation site is semantic context too (terminology, structure, what is covered elsewhere).
+  const siteRepo = process.env.SITE_REPO || '';
+  if (siteRepo && process.env.SITE_DIR) {
+    const t1 = Date.now();
+    const base1 = { runId, repo, path: '*', commit, node: 'sync_site', at: new Date().toISOString() };
+    try {
+      const site = await syncSite({ siteRepo, commit: siteCommit(process.env.SITE_DIR), files: siteFiles(process.env.SITE_DIR), readFile: readSiteFile(process.env.SITE_DIR), docStore: d.vectors, llm: d.llm, facts: d.facts });
+      await logger.log({ ...base1, status: site.skipped ? 'skip' : 'ok', ms: Date.now() - t1, note: site });
+    } catch (e) {
+      await logger.log({ ...base1, status: 'error', ms: Date.now() - t1, note: { error: e.message } }); // degrades context only
+    }
+  }
+
   let contextError = null;
   if (policy.mode === 'code' || policy.mode === 'both') {
     const t0 = Date.now();
@@ -85,7 +100,7 @@ async function main() {
       const prev0 = G.revExists(sourceDir, before) ? before : '';
       const stats = await syncContext({
         repo, commit, before: prev0, full: process.env.FULL_SYNC === '1', git: G.accessors(sourceDir),
-        codeStore: d.codeVectors, docStore: d.vectors, llm: d.llm, facts: d.facts, pages: policy.pages || [], scope: pagesScope(policy.pages), exclude: policy.exclude || [],
+        codeStore: d.codeVectors, docStore: d.vectors, llm: d.llm, facts: d.facts, pages: policy.pages || [], scope: pagesScope(policy.pages), exclude: policy.exclude || [], docs: policy.docs || [],
       });
       await logger.log({ ...base0, status: 'ok', ms: Date.now() - t0, note: stats });
     } catch (e) {
@@ -117,7 +132,12 @@ async function main() {
       },
     }));
   }
-  console.log(`mode=${policy.mode || 'docs'} | ${changes.length} change unit(s)`);
+  // ONLY_PAGES=data-model.md,overview.md regenerates just those pages while the context stays loaded for ALL declared pages.
+  const only = (process.env.ONLY_PAGES || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (only.length) {
+    for (let i = changes.length - 1; i >= 0; i--) if (changes[i].kind === 'code' && !only.includes(changes[i].filePath)) changes.splice(i, 1);
+  }
+  console.log(`mode=${policy.mode || 'docs'} | ${changes.length} change unit(s)${only.length ? ` (only: ${only.join(', ')})` : ''}`);
 
   for (const change of changes) {
     const file = change.filePath;
@@ -127,7 +147,7 @@ async function main() {
       decision = await processChange(change, {
         styles,
         cfg, llm: d.llm, vectors: d.vectors, codeVectors: d.codeVectors, facts: d.facts, registry: d.registry, policy, instructions,
-        templateFiles, defaultTemplate, runId, githubHost: process.env.GIT_HOST, logger, escalate: escalateFn,
+        templateFiles, defaultTemplate, runId, githubHost: process.env.GIT_HOST, logger, escalate: escalateFn, siteRepo: siteRepo || undefined,
       });
     } catch (e) {
       // Infrastructure failure (AI/Qdrant/Postgres down): fail safe, never publish.

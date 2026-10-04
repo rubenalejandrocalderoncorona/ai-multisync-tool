@@ -42,6 +42,10 @@ on:
         required: false
         type: boolean
         default: false
+      pages:
+        description: 'Code mode: only these pages, comma separated (for example data-model.md). Blank = all declared pages'
+        required: false
+        default: ''
 
 # One run per target branch at a time: queue, never cancel, so no dispatch is dropped.
 concurrency:
@@ -162,6 +166,11 @@ jobs:
           GIT_HOST: ${{ vars.GIT_HOST || 'github.com' }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           FULL_SYNC: ${{ github.event.inputs.full == 'true' && '1' || '' }}
+          ONLY_PAGES: ${{ github.event.inputs.pages || '' }}
+          # The rest of THIS documentation site is semantic context (terminology, structure, what is covered elsewhere).
+          SITE_REPO: ${{ github.repository }}
+          SITE_DIR: ${{ github.workspace }}
+          CONTEXT_MIN_SCORE: ${{ vars.CONTEXT_MIN_SCORE || '0.45' }}
           DOC_STYLES: ${{ github.workspace }}/config/doc-styles.json
           PROMPTS_DIR: ${{ hashFiles('prompts/judge-docs.md') != '' && format('{0}/prompts', github.workspace) || '' }}
           # Config comes from THIS repo; tool defaults are the fallback.

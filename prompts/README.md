@@ -10,6 +10,7 @@ Every LLM instruction the pipeline uses lives here, so reviewers can read and ch
 | `plan-docs.md` | `semantic_context` node (stage 2) | Decide what the page must contain, from the fact sheet plus the documentation index |
 | `draft-docs.md` | `write_draft` node | Restructure a source doc into a page (persona injected from the style library) |
 | `draft-code.md` | `write_draft` node | Write or update a page from code |
+| `standards-code.md` | `write_draft` / `polish_draft`, code mode | Lean formatting standards used instead of the business standards file (no required References, Classification or Change History) |
 | `gar-facts.md` | `gar` node (code mode) | Hypothetical documentation paragraphs written from the fact sheet; each is a retrieval query against the docs index |
 | `gar.md` | `similarity` / `gar` nodes | Hypothetical paragraph used for retrieval; never indexed |
 | `polish.md` | `polish_draft` node | Language-only pass, forbidden from changing facts |

@@ -66,7 +66,7 @@ const passJudge = { claims: [{ text: 'port is 8080', supported: true }], facts: 
 const hallucinationJudge = { claims: [{ text: 'supports gRPC', supported: false }, { text: 'port is 8080', supported: true }], facts: [{ text: 'port 8080', covered: true }], style: 0.9, quality: 0.9, notes: [] };
 
 function makeDeps(overrides = {}) {
-  const cfg = loadConfig({ INTERNAL_AI_API_KEY: 'test', MIN_DIFF_LINES: '3', MAX_ITERATIONS: '2', ...overrides.env });
+  const cfg = loadConfig({ INTERNAL_AI_API_KEY: 'test', MIN_DIFF_LINES: '3', MAX_ITERATIONS: '2', CONTEXT_MIN_SCORE: '0', ...overrides.env });
   return {
     cfg,
     llm: overrides.llm || fakeLLM({ judges: [passJudge] }),

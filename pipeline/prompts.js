@@ -57,4 +57,9 @@ function styleText(style, policy = {}) {
   ].filter(Boolean).join('\n\n');
 }
 
-module.exports = { loadPrompt, fill, loadStyles, resolveStyle, styleText };
+/** The section skeleton for a style, as text for the writer and planner. Empty when the style has none. */
+function outlineText(style) {
+  return style?.outline?.length ? `OUTLINE (follow this order; delete any section you have no facts for):\n${style.outline.map((o) => `## ${o}`).join('\n')}` : '';
+}
+
+module.exports = { loadPrompt, fill, loadStyles, resolveStyle, styleText, outlineText };
