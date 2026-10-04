@@ -17,15 +17,32 @@ class QdrantStore {
     this.collection = collection;
   }
 
-  async _req(method, path, body) {
-    const res = await this.fetch(`${this.cfg.url}${path}`, {
-      method,
-      headers: { 'Content-Type': 'application/json', ...(this.cfg.apiKey ? { 'api-key': this.cfg.apiKey } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`Qdrant ${method} ${path} -> ${res.status}: ${text.slice(0, 300)}`);
-    return text ? JSON.parse(text) : {};
+  /**
+   * One request, retried on transient failures (408, 425, 429, 5xx, network errors) with exponential backoff.
+   * A long run must not die because of one dropped connection or a busy server.
+   */
+  async _req(method, path, body, { retries = 4, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+    for (let attempt = 0; ; attempt++) {
+      let res; let text;
+      try {
+        res = await this.fetch(`${this.cfg.url}${path}`, {
+          method,
+          headers: { 'Content-Type': 'application/json', ...(this.cfg.apiKey ? { 'api-key': this.cfg.apiKey } : {}) },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        text = await res.text();
+      } catch (err) {
+        if (attempt >= retries) throw err;
+        await sleep(Math.min(500 * 2 ** attempt, 8000));
+        continue;
+      }
+      if (res.ok) return text ? JSON.parse(text) : {};
+      if ([408, 425, 429, 500, 502, 503, 504].includes(res.status) && attempt < retries) {
+        await sleep(Math.min(500 * 2 ** attempt, 8000));
+        continue;
+      }
+      throw new Error(`Qdrant ${method} ${path} -> ${res.status}: ${text.slice(0, 300)}`);
+    }
   }
 
   async health() {
@@ -45,9 +62,11 @@ class QdrantStore {
     }
   }
 
-  async upsert(points) {
-    if (!points.length) return;
-    await this._req('PUT', `/collections/${this.collection}/points?wait=true`, { points });
+  /** Batched: Qdrant rejects a request over 32 MB, which a large repository exceeds in one go. */
+  async upsert(points, batch = 256) {
+    for (let i = 0; i < points.length; i += batch) {
+      await this._req('PUT', `/collections/${this.collection}/points?wait=true`, { points: points.slice(i, i + batch) });
+    }
   }
 
   /** @returns {Promise<{id:string, score:number, payload:object}[]>} */
@@ -85,10 +104,13 @@ class QdrantStore {
     await this._req('POST', `/collections/${this.collection}/points/delete?wait=true`, { filter: { must } });
   }
 
-  async count(repo) {
+  async count(repo, kind) {
+    const must = [];
+    if (repo) must.push({ key: 'repo', match: { value: repo } });
+    if (kind) must.push({ key: 'kind', match: { value: kind } });
     const out = await this._req('POST', `/collections/${this.collection}/points/count`, {
       exact: true,
-      filter: repo ? { must: [{ key: 'repo', match: { value: repo } }] } : undefined,
+      filter: must.length ? { must } : undefined,
     });
     return out.result.count;
   }
@@ -115,7 +137,7 @@ class MemoryVectorStore {
   async deleteByRepo(repo, kind) {
     for (const [id, p] of this.points) if (p.payload.repo === repo && (!kind || p.payload.kind === kind)) this.points.delete(id);
   }
-  async count(repo) { return [...this.points.values()].filter((p) => !repo || p.payload.repo === repo).length; }
+  async count(repo, kind) { return [...this.points.values()].filter((p) => (!repo || p.payload.repo === repo) && (!kind || p.payload.kind === kind)).length; }
 }
 
 /**

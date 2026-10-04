@@ -10,7 +10,7 @@ Hard rules (these override the documentation standards and the template wherever
 - EXISTING_PAGE may be stale. Keep its accurate content and structure where CODE still supports it, update what CODE changed, and remove what CODE no longer does. Do not carry over a claim you cannot confirm in CODE.
 - Prioritise what CHANGED_FILES added, changed or removed, but keep the page complete for a new reader.
 - CONTEXT (other published pages) may guide terminology and tone only. Never copy facts from it.
-- Follow the TEMPLATE's layout; delete sections you have no information for, and delete template authoring instructions.
+- Follow the OUTLINE in TEMPLATE; delete sections you have no information for. Never invent a section the outline does not list, and never write a section only to fill space.
 - Do NOT write a Change History section; it is added automatically. Never write a date.
 - Do NOT add a References, Related or Further Reading section, and never write a link whose target is `#`, a placeholder, or a URL that does not appear in CODE, RELATED_CODE or EXISTING_PAGE.
 - Do NOT add Troubleshooting, Safety or Security sections unless CODE shows the error messages, checks or protections you would describe. When the code shows a message or condition, quote it exactly.

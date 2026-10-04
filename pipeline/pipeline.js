@@ -25,6 +25,7 @@ const { crossRepoCheck } = require('./registry');
 const { judge, evaluate } = require('./critic');
 const { chunkMarkdown } = require('./chunker');
 const W = require('./writer');
+const { checkCoverage } = require('./coverage');
 const P = require('./prompts');
 const { retrieveCode, retrieveSemantic } = require('./context');
 const { analyzeCode, planDocs, sheetText, planText } = require('./stages');
@@ -51,6 +52,8 @@ const State = Annotation.Root({
   verdict: Annotation(),
   failure: Annotation({ reducer: last, default: () => null }),
   accepted: Annotation({ reducer: last, default: () => null }),
+  garQueries: Annotation({ reducer: last, default: () => [] }),
+  ctx: Annotation({ reducer: (a, b) => ({ ...a, ...b }), default: () => ({}) }),
   relatedCode: Annotation({ reducer: last, default: () => '' }),
   factSheet: Annotation({ reducer: last, default: () => null }),
   plan: Annotation({ reducer: last, default: () => null }),
@@ -68,13 +71,11 @@ const dedupe = (chunks) => {
   return chunks.filter((c) => (seen.has(c.id) ? false : seen.add(c.id)));
 };
 
-async function retrieve({ vectors, llm, repo, after, hypothetical, topK }) {
-  const [ragVec, garVec] = await llm.embed([after.slice(0, 2000), hypothetical]);
-  const [rag, gar] = await Promise.all([
-    vectors.search(ragVec, { limit: topK, repo }),
-    vectors.search(garVec, { limit: topK, repo }),
-  ]);
-  return dedupe([...gar, ...rag]).slice(0, topK)
+async function retrieve({ vectors, llm, repo, after, hypothetical, garQueries = [], topK }) {
+  const vecs = await llm.embed([after.slice(0, 2000), hypothetical, ...garQueries]);
+  const [ragVec, ...garVecs] = vecs;
+  const [rag, ...gars] = await Promise.all([ragVec, ...garVecs].map((v) => vectors.search(v, { limit: topK, repo })));
+  return dedupe([...gars.flat(), ...rag]).slice(0, topK)
     .map((h) => ({ id: h.id, score: h.score, heading: h.payload.heading, text: h.payload.text }));
 }
 
@@ -92,6 +93,8 @@ async function processChange(change, deps) {
   const style = P.resolveStyle(deps.styles || P.loadStyles(), change.styleKey || policy.style);
   const styleTxt = P.styleText(style, policy);
   const changedFiles = change.changedFiles || [];
+  // Code mode writes to the style's outline under lean formatting standards; docs mode keeps the template + full standards.
+  const instructions = mode === 'code' ? P.loadPrompt('standards-code').text : deps.instructions;
   base.mode = mode;
   base.style = style.key;
 
@@ -113,7 +116,7 @@ async function processChange(change, deps) {
     return { ...update, trail: [event] };
   };
 
-  const finish = (state, d) => ({ ...base, attempts: state.attempts || [], metrics: state.metrics || {}, action: 'none', ...d });
+  const finish = (state, d) => ({ ...base, attempts: state.attempts || [], metrics: state.metrics || {}, context: { ...(state.ctx || {}), gar: state.garQueries || [] }, action: 'none', ...d });
   const withMetrics = (s, m) => ({ ...s, metrics: { ...s.metrics, ...m } });
 
   const nodes = {
@@ -205,15 +208,15 @@ async function processChange(change, deps) {
       const topK = s.widened ? t.codeTopKWidened : t.codeTopK;
       const inSnapshot = change.snapshotFiles || [];
       const related = await retrieveCode({
-        llm, store: codeVectors, repo: change.repo, topK, exclude: inSnapshot, budgetChars: t.contextBudgetChars,
+        llm, store: codeVectors, repo: change.repo, topK, exclude: inSnapshot, budgetChars: t.contextBudgetChars, minScore: t.contextMinScore,
         queries: [change.after.slice(0, 3000), [change.brief, style.key, change.filePath].filter(Boolean).join('\n')],
       });
       const { sheet, promptId, dropped } = await analyzeCode(llm, {
         page: change.filePath, styleKey: style.key, changedFiles, repoMap: change.repoMap || [], code: change.after, related,
       });
       return {
-        note: { related: related.length, relatedFiles: [...new Set(related.map((c) => c.path))].length, facts: sheet.facts.length, droppedNoEvidence: dropped, unclear: sheet.unclear.length, topK, widened: s.widened, prompt: promptId },
-        update: { relatedCode: related.map((c) => c.text).join('\n\n'), factSheet: sheet },
+        note: { basedOnFiles: (change.snapshotFiles || []).length, scopedFiles: (change.repoMap || []).length, snapshotChars: change.after.length, related: related.length, relatedFiles: [...new Set(related.map((c) => c.path))].length, relatedTop: related.slice(0, 6).map((c) => `${c.path}:${c.start}-${c.end} (${c.score.toFixed(2)})`), facts: sheet.facts.length, droppedNoEvidence: dropped, unclear: sheet.unclear.length, topK, widened: s.widened, prompt: promptId },
+        update: { relatedCode: related.map((c) => c.text).join('\n\n'), factSheet: sheet, ctx: { snapshot: { files: (change.snapshotFiles || []).slice(0, 60), count: (change.snapshotFiles || []).length, chars: change.after.length, scoped: (change.repoMap || []).length }, code: related.map((c) => ({ path: c.path, start: c.start, end: c.end, score: Number(c.score.toFixed(3)) })), facts: sheet.facts.map((f) => ({ id: f.id, text: f.text, evidence: f.evidence })) } },
       };
     }),
 
@@ -221,36 +224,41 @@ async function processChange(change, deps) {
     semantic_context: traced('semantic_context', async (s) => {
       const topK = s.widened ? t.topKWidened : t.topK;
       const related = await retrieveSemantic({
-        llm, store: vectors, repo: change.repo, topK,
-        queries: [s.hypothetical, change.brief, change.existing.slice(0, 1500)],
+        llm, store: vectors, repo: change.repo, topK, siteRepo: deps.siteRepo, minScore: t.contextMinScore,
+        queries: [...s.garQueries, s.hypothetical, change.brief, change.existing.slice(0, 1500)],
       });
-      const template = fs.existsSync(s.templatePath) ? fs.readFileSync(s.templatePath, 'utf-8') : '';
+      const template = mode === 'code' ? P.outlineText(style) : (s.templatePath && fs.existsSync(s.templatePath) ? fs.readFileSync(s.templatePath, 'utf-8') : '');
       const { plan, promptId } = await planDocs(llm, { sheet: s.factSheet, brief: change.brief, styleText: styleTxt, existing: change.existing, related, template });
       return {
-        note: { related: related.length, kinds: [...new Set(related.map((c) => c.kind))], sections: plan.sections.length, gaps: plan.gaps.length, topK, prompt: promptId },
-        update: { plan },
+        note: { queries: s.garQueries.length + 3, garQueries: s.garQueries.length, related: related.length, kinds: [...new Set(related.map((c) => c.kind))], relatedTop: related.slice(0, 6).map((c) => `${c.kind}:${c.path}${c.heading ? ` > ${c.heading}` : ''} (${c.score.toFixed(2)})`), sections: plan.sections.length, gaps: plan.gaps.length, topK, prompt: promptId },
+        update: { plan, ctx: { semantic: related.map((c) => ({ kind: c.kind, path: c.path, heading: c.heading, score: Number(c.score.toFixed(3)) })), plan: plan.sections.map((x) => ({ heading: x.heading, action: x.action, must_cover: x.must_cover })) } },
       };
     }),
 
     gar: traced('gar', async (s) => {
       const hypothetical = s.hypothetical
         || await W.generateHypothetical(llm, { filePath: change.filePath, before: change.before, after: change.after, mode, changedFiles });
-      const templatePath = await W.selectTemplate(llm, {
+      // Code mode: GAR proper. Hypothetical docs are written from the VERIFIED fact sheet (one paragraph per topic)
+      // and each one becomes a query against the documentation index in the semantic stage.
+      const gar = mode === 'code' && s.factSheet?.facts?.length
+        ? await W.generateGarFromFacts(llm, { sheet: s.factSheet, brief: change.brief })
+        : { paragraphs: [] };
+      const templatePath = mode === 'code' ? null : await W.selectTemplate(llm, {
         filePath: change.filePath, content: change.after, templateFiles: deps.templateFiles, defaultTemplate: deps.defaultTemplate,
       });
       const knownFacts = await facts.approvedClaims(change.repo, change.filePath);
       return {
-        note: { template: path.basename(templatePath || ''), knownFacts: knownFacts.length, style: style.key, styleFallback: style.fallback, reusedHypothetical: !!s.hypothetical },
-        update: { hypothetical, templatePath, knownFacts, styleText: styleTxt },
+        note: { template: templatePath ? path.basename(templatePath) : `outline:${style.key || 'none'}`, knownFacts: knownFacts.length, style: style.key, styleFallback: style.fallback, reusedHypothetical: !!s.hypothetical, garParagraphs: gar.paragraphs.length, ...(gar.error ? { garError: gar.error } : {}) },
+        update: { hypothetical, garQueries: gar.paragraphs, templatePath, knownFacts, styleText: styleTxt },
       };
     }),
 
     write_draft: traced('write_draft', async (s) => {
       const topK = s.widened ? t.topKWidened : t.topK;
-      const context = await retrieve({ vectors, llm, repo: change.repo, after: change.after, hypothetical: s.hypothetical, topK });
+      const context = await retrieve({ vectors, llm, repo: change.repo, after: change.after, hypothetical: s.hypothetical, garQueries: s.garQueries, topK });
       const out = await W.draftDocument(llm, {
         mode, filePath: change.filePath, source: change.after, existing: change.existing, changedFiles,
-        relatedCode: s.relatedCode, factSheet: sheetText(s.factSheet), plan: planText(s.plan), templatePath: s.templatePath, context, policy, style, instructions: deps.instructions, feedback: s.feedback,
+        relatedCode: s.relatedCode, factSheet: sheetText(s.factSheet), plan: planText(s.plan), templatePath: s.templatePath, context, policy, style, instructions, feedback: s.feedback,
       });
       return {
         note: { attempt: s.iter + 1, widened: s.widened, topK, contextChunks: context.length, feedbackItems: s.feedback.length, prompt: out.promptId, style: style.key },
@@ -260,10 +268,17 @@ async function processChange(change, deps) {
 
     judge: traced('judge', async (s) => {
       const verdict = await judge(llm, { mode, source: change.after, draft: s.draft, knownFacts: s.knownFacts, styleText: s.styleText, existing: change.existing, changedFiles, relatedCode: s.relatedCode, factSheet: sheetText(s.factSheet), plan: planText(s.plan) });
-      const failure = evaluate(verdict, t);
+      let failure = evaluate(verdict, t);
+      // Deterministic completeness (code mode, styles that opt in): every declared name must be in the page.
+      const cov = mode === 'code' ? checkCoverage(s.draft, change.after, style.coverage) : null;
+      if (cov && !cov.ok) {
+        const names = cov.missing.slice(0, 40).map((m) => m.split(':').slice(1).join(':'));
+        const fb = `Incomplete: ${cov.missing.length} of ${Object.values(cov.kinds).reduce((a, k) => a + k.total, 0)} declared names are not documented. Add every one of: ${names.join(', ')}${cov.missing.length > 40 ? ', ...' : ''}`;
+        failure = failure ? { ...failure, feedback: [...failure.feedback, fb] } : { tag: 'incomplete_coverage', feedback: [fb] };
+      }
       const polishable = failure && GROUNDED_ONLY_TAGS.has(failure.tag) && !s.polished;
       const scores = { precision: verdict.precision, recall: verdict.recall, style: verdict.style, quality: verdict.quality };
-      const note = { ...scores, failure: failure?.tag || null, willPolish: !!polishable, prompt: verdict.promptId, coreRecall: verdict.coreRecall, ...(verdict.missingCore.length ? { missingCore: verdict.missingCore.slice(0, 6) } : {}), ...(verdict.missing.length ? { missing: verdict.missing.slice(0, 6) } : {}), ...(verdict.unsupported.length ? { unsupported: verdict.unsupported.slice(0, 6) } : {}) };
+      const note = { ...scores, ...(cov ? { coverage: Object.fromEntries(Object.entries(cov.kinds).map(([k, v]) => [k, `${v.found}/${v.total}`])), coverageMissing: cov.missing.slice(0, 8) } : {}), failure: failure?.tag || null, willPolish: !!polishable, prompt: verdict.promptId, coreRecall: verdict.coreRecall, ...(verdict.missingCore.length ? { missingCore: verdict.missingCore.slice(0, 6) } : {}), ...(verdict.missing.length ? { missing: verdict.missing.slice(0, 6) } : {}), ...(verdict.unsupported.length ? { unsupported: verdict.unsupported.slice(0, 6) } : {}) };
       if (polishable) return { note, update: { verdict, failure } };
       const attempt = { n: s.iter, widened: s.widened, topK: s.widened ? t.topKWidened : t.topK, ...scores, failure: failure?.tag || null };
       return {
@@ -273,7 +288,7 @@ async function processChange(change, deps) {
     }),
 
     polish_draft: traced('polish_draft', async (s) => {
-      const draft = await W.polishOnly(llm, { draft: s.draft, policy, style, instructions: deps.instructions });
+      const draft = await W.polishOnly(llm, { draft: s.draft, policy, style, instructions });
       return { note: { reason: s.failure.tag }, update: { draft, polished: true } };
     }),
 

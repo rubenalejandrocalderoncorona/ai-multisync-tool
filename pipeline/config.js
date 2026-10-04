@@ -52,6 +52,7 @@ function loadConfig(env = process.env) {
       codeTopK: num(env.CODE_TOP_K, 12),
       codeTopKWidened: num(env.CODE_TOP_K_WIDENED, 30),
       contextBudgetChars: num(env.CONTEXT_BUDGET_CHARS, 30000),
+      contextMinScore: num(env.CONTEXT_MIN_SCORE, 0.45), // retrieved chunks below this cosine score are dropped
     },
     paths: {
       reposConfig: env.REPOS_CONFIG || 'config/repos.json',
@@ -66,6 +67,12 @@ function loadConfig(env = process.env) {
       deskBaseUrl: (env.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx').replace(/\/$/, ''),
       deskToken: env.CAIMANDESK_API_TOKEN || '',
       deskProjectId: env.CAIMANDESK_PROJECT_ID || '',
+      // The base can be cluster-internal (http://caiman-tickets.caimanlabs-operations.svc.cluster.local) for the in-cluster
+      // runner; ticket links always use the public URL.
+      deskPublicUrl: (env.CAIMANDESK_PUBLIC_URL || env.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx').replace(/\/$/, ''),
+      // mcp (Vikunja's built-in MCP, the default) | rest (Vikunja API). Both use the same API token.
+      deskTransport: env.CAIMANDESK_TRANSPORT || 'mcp',
+      deskMcpUrl: env.CAIMANDESK_MCP_URL || `${(env.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx').replace(/\/$/, '')}/api/v2/mcp`,
       slackWebhook: env.SLACK_WEBHOOK_URL || '',
       githubToken: env.GITHUB_TOKEN || env.DOCS_SYNC_PAT || '',
       githubRepo: env.GITHUB_REPOSITORY || '',

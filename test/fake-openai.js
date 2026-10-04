@@ -1,7 +1,7 @@
 'use strict';
 /** A local OpenAI-compatible server with scripted answers for every pipeline stage. Used by CLI and integration tests. */
 const http = require('node:http');
-const { embedText, passJudge, CODE_FACTS, PLAN } = require('./helpers');
+const { embedText, passJudge, CODE_FACTS, PLAN, GAR_FACTS } = require('./helpers');
 
 function startFakeOpenAI(judgeResult = passJudge) {
   const hits = { chat: 0, embed: 0, judge: 0 };
@@ -19,7 +19,8 @@ function startFakeOpenAI(judgeResult = passJudge) {
       const sys = j.messages[0].content;
       const user = j.messages[1]?.content || '';
       let content;
-      if (sys.includes('You are a code analyst')) { hits.analyze = (hits.analyze || 0) + 1; content = JSON.stringify(CODE_FACTS); }
+      if (sys.includes('HYPOTHETICAL documentation')) { hits.garFacts = (hits.garFacts || 0) + 1; content = JSON.stringify(GAR_FACTS); }
+      else if (sys.includes('You are a code analyst')) { hits.analyze = (hits.analyze || 0) + 1; content = JSON.stringify(CODE_FACTS); }
       else if (sys.includes('You are a documentation planner')) { hits.plan = (hits.plan || 0) + 1; content = JSON.stringify(PLAN); }
       else if (sys.includes('You are the JUDGE')) { hits.judge++; content = JSON.stringify(judgeResult); }
       else if (sys.includes('ONE short paragraph')) content = 'The project exposes an alert API on port 8081.';

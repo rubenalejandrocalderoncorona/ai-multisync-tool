@@ -89,7 +89,7 @@ test('CLI fails safe: model unreachable becomes a pipeline_error fallback, nothi
     sh('add', '-A'); sh('commit', '-qm', 'one');
     const c = sh('rev-parse', 'HEAD').trim();
     fs.writeFileSync(path.join(work, 'repos.json'), JSON.stringify({ repos: { 'o/proj': { mode: 'code', serviceName: 'proj' } } }));
-    const env = { ...process.env, AI_API_BASE_URL: 'http://127.0.0.1:9', INTERNAL_AI_API_KEY: 'x', AI_TIMEOUT_MS: '1500', VECTOR_DRIVER: 'memory', FACTSTORE_DRIVER: 'memory', REPOS_CONFIG: path.join(work, 'repos.json'), FEATURE_REGISTRY: path.join(work, 'n.json'), DOCS_ROOT: 'site/docs', SOURCE_REPO: 'o/proj', SOURCE_SHA: c, SOURCE_BEFORE: '0'.repeat(40), SOURCE_DIR: src, TICKET_PROVIDER: 'none', TEMPLATES_PATH: path.join(__dirname, '../docs/templates') };
+    const env = { ...process.env, AI_API_BASE_URL: 'http://127.0.0.1:9', INTERNAL_AI_API_KEY: 'x', AI_TIMEOUT_MS: '1500', AI_MAX_RETRIES: '0', VECTOR_DRIVER: 'memory', FACTSTORE_DRIVER: 'memory', REPOS_CONFIG: path.join(work, 'repos.json'), FEATURE_REGISTRY: path.join(work, 'n.json'), DOCS_ROOT: 'site/docs', SOURCE_REPO: 'o/proj', SOURCE_SHA: c, SOURCE_BEFORE: '0'.repeat(40), SOURCE_DIR: src, TICKET_PROVIDER: 'none', TEMPLATES_PATH: path.join(__dirname, '../docs/templates') };
     const r = await run('node', [path.join(__dirname, '../scripts/run_pipeline.js')], { cwd: work, env });
     assert.strictEqual(r.code, 0, r.out);
     const d = JSON.parse(fs.readFileSync(path.join(work, 'pipeline-results.json'), 'utf-8')).results[0];
@@ -99,4 +99,27 @@ test('CLI fails safe: model unreachable becomes a pipeline_error fallback, nothi
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }
+});
+
+test('CLI: a protected target branch (main) forces review even for a trust=auto repo', async () => {
+  const { server, url } = await startFakeOpenAI();
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'msync-'));
+  const src = path.join(work, 'source-repo');
+  const sh = (...a) => execFileSync('git', ['-C', src, ...a], { encoding: 'utf-8' });
+  try {
+    fs.mkdirSync(path.join(src, 'src'), { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', src]);
+    sh('config', 'user.email', 't@t'); sh('config', 'user.name', 't');
+    fs.writeFileSync(path.join(src, 'src/a.go'), 'package main\nfunc Alert() {}\n');
+    sh('add', '-A'); sh('commit', '-qm', 'one'); const c1 = sh('rev-parse', 'HEAD').trim();
+    fs.writeFileSync(path.join(src, 'src/a.go'), 'package main\nfunc Alert() {}\nfunc Silence(id string) {}\nvar channels = []string{"email", "slack", "sms"}\nconst Port = 8081\n');
+    sh('add', '-A'); sh('commit', '-qm', 'two'); const c2 = sh('rev-parse', 'HEAD').trim();
+    fs.writeFileSync(path.join(work, 'repos.json'), JSON.stringify({ repos: { 'o/proj': { mode: 'code', trust: 'auto', serviceName: 'proj', pages: [{ path: 'api.md', scope: ['src/**'] }] } } }));
+    const env = { ...process.env, AI_API_BASE_URL: url, INTERNAL_AI_API_KEY: 'x', VECTOR_DRIVER: 'memory', FACTSTORE_DRIVER: 'memory', REPOS_CONFIG: path.join(work, 'repos.json'), FEATURE_REGISTRY: path.join(work, 'n.json'), DOCS_ROOT: 'site/docs', TEMPLATES_PATH: path.join(__dirname, '../docs/templates'), SOURCE_REPO: 'o/proj', SOURCE_SHA: c2, SOURCE_BEFORE: c1, SOURCE_DIR: src, TICKET_PROVIDER: 'none' };
+    const direct = await run('node', [path.join(__dirname, '../scripts/run_pipeline.js')], { cwd: work, env: { ...env, TARGET_BRANCH: 'staging' } });
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(work, 'pipeline-results.json'), 'utf-8')).results[0].outcome, 'published', direct.out);
+    const prot = await run('node', [path.join(__dirname, '../scripts/run_pipeline.js')], { cwd: work, env: { ...env, TARGET_BRANCH: 'main' } });
+    assert.match(prot.out, /trust forced from auto to review/);
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(work, 'pipeline-results.json'), 'utf-8')).results[0].outcome, 'pending_review');
+  } finally { server.close(); fs.rmSync(work, { recursive: true, force: true }); }
 });

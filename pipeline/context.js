@@ -13,7 +13,9 @@
  * heals itself instead of drifting.
  */
 const { chunkCode, chunkMarkdown, pointId } = require('./chunker');
-const { selectFiles, scrub } = require('./codesource');
+const { selectFiles, scrub, globToRegExp } = require('./codesource');
+
+const matchesAny = (f, globs) => globs.some((g) => globToRegExp(g).test(f));
 
 const BATCH = 64;
 const MAX_FILE_BYTES = 200_000;
@@ -41,9 +43,10 @@ async function embedAll(llm, texts) {
  * @param {object} [a.pages]       policy pages (for briefs)
  * @param {string[]} [a.scope]     globs the index may read (union of the pages' scopes)
  * @param {string[]} [a.exclude]   globs that must never be read (repo-level exclude)
+ * @param {string[]} [a.docs]      extra globs of existing documentation to index as semantic context (kind source_doc)
  * @param {{maxFiles?:number,maxChunks?:number}} [a.limits]
  */
-async function syncContext({ repo, commit, before = '', full = false, git, codeStore, docStore, llm, facts, pages = [], scope = ['**'], exclude = [], limits = {} }) {
+async function syncContext({ repo, commit, before = '', full = false, git, codeStore, docStore, llm, facts, pages = [], scope = ['**'], exclude = [], docs = [], limits = {} }) {
   const started = Date.now();
   const maxFiles = limits.maxFiles ?? 3000;
   const maxChunks = limits.maxChunks ?? 8000;
@@ -52,7 +55,9 @@ async function syncContext({ repo, commit, before = '', full = false, git, codeS
   // The index may only contain what the repo's declared pages are allowed to read.
   const allowed = new Set(selectFiles(all, { scope, exclude }));
   const codeFiles = [...allowed].filter((f) => !DOC_FILE.test(f));
-  const docFiles = all.filter((f) => DOC_FILE.test(f) && allowed.has(f));
+  // Semantic sources are not limited to the pages' code scope: the README, docs/ and any `docs` globs the repo declares
+  // (for example an existing end-user docs app). The repo-level exclude still applies.
+  const docFiles = all.filter((f) => (DOC_FILE.test(f) || matchesAny(f, docs)) && !matchesAny(f, exclude));
 
   const state = await facts.getContextState(repo);
   const incremental = !full && !!before && !!state && state.commit === before;
@@ -118,15 +123,39 @@ async function syncContext({ repo, commit, before = '', full = false, git, codeS
 }
 
 /**
+ * Index the pages of the central documentation site itself (kind site_doc) under the key `site:<repo>`.
+ * They are the semantic context for terminology, structure and what is already covered elsewhere.
+ * Re-indexed only when the site's commit changes.
+ */
+async function syncSite({ siteRepo, commit, files, readFile, docStore, llm, facts }) {
+  const key = `site:${siteRepo}`;
+  const state = await facts.getContextState(key);
+  if (state && state.commit === commit) return { skipped: true, pages: state.files, chunks: state.chunks, reason: `site already indexed at ${commit.slice(0, 7)}` };
+  await docStore.deleteByRepo(key);
+  const pts = [];
+  for (const f of files) {
+    const raw = readFile(f);
+    if (raw == null) continue;
+    for (const [i, c] of chunkMarkdown(raw).entries()) {
+      pts.push({ id: pointId(key, f, i), text: `${c.heading}\n${c.text}`, payload: { repo: key, path: f, chunk: i, heading: c.heading, text: c.text, commit, kind: 'site_doc' } });
+    }
+  }
+  const vecs = await embedAll(llm, pts.map((p) => p.text));
+  await docStore.upsert(pts.map((p, i) => ({ id: p.id, vector: vecs[i], payload: p.payload })));
+  await facts.setContextState(key, { commit, files: files.length, chunks: pts.length });
+  return { skipped: false, pages: files.length, chunks: pts.length };
+}
+
+/**
  * Retrieve code chunks relevant to the given queries from across the whole repo, skipping files the
  * caller already has in full, within a character budget.
  */
-async function retrieveCode({ llm, store, repo, queries, topK, exclude = [], budgetChars = 30000 }) {
+async function retrieveCode({ llm, store, repo, queries, topK, exclude = [], budgetChars = 30000, minScore = 0 }) {
   const vecs = await llm.embed(queries.filter(Boolean));
   const seen = new Map();
   for (const v of vecs) {
     for (const h of await store.search(v, { limit: topK * 2, repo, kind: 'code' })) {
-      if (exclude.includes(h.payload.path)) continue;
+      if (exclude.includes(h.payload.path) || h.score < minScore) continue; // marginal matches are noise, not context
       const prev = seen.get(h.id);
       if (!prev || h.score > prev.score) seen.set(h.id, { id: h.id, score: h.score, path: h.payload.path, start: h.payload.start, end: h.payload.end, text: h.payload.text });
     }
@@ -143,16 +172,20 @@ async function retrieveCode({ llm, store, repo, queries, topK, exclude = [], bud
 }
 
 /** Semantic context: approved pages, source docs and briefs for this repo. */
-async function retrieveSemantic({ llm, store, repo, queries, topK }) {
+async function retrieveSemantic({ llm, store, repo, queries, topK, siteRepo, siteTopK = 3, minScore = 0 }) {
   const vecs = await llm.embed(queries.filter(Boolean));
   const seen = new Map();
   for (const v of vecs) {
-    for (const h of await store.search(v, { limit: topK * 2, repo, kind: ['approved', 'source_doc', 'brief'] })) {
+    const hits = await store.search(v, { limit: topK * 2, repo, kind: ['approved', 'source_doc', 'brief'] });
+    // the rest of the documentation site: terminology, structure, what is already covered elsewhere
+    if (siteRepo) hits.push(...await store.search(v, { limit: siteTopK, repo: `site:${siteRepo}`, kind: 'site_doc' }));
+    for (const h of hits) {
+      if (h.payload.kind !== 'brief' && h.score < minScore) continue; // the page brief is always kept; everything else must be relevant
       const prev = seen.get(h.id);
       if (!prev || h.score > prev.score) seen.set(h.id, { id: h.id, score: h.score, kind: h.payload.kind, path: h.payload.path, heading: h.payload.heading, text: h.payload.text });
     }
   }
-  return [...seen.values()].sort((a, b) => b.score - a.score).slice(0, topK);
+  return [...seen.values()].sort((a, b) => b.score - a.score).slice(0, topK + (siteRepo ? siteTopK : 0));
 }
 
-module.exports = { syncContext, retrieveCode, retrieveSemantic, DOC_FILE };
+module.exports = { syncContext, syncSite, retrieveCode, retrieveSemantic, DOC_FILE };

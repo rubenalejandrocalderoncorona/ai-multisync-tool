@@ -7,4 +7,5 @@ namespace: multirepo
 resources:
   - migrate-job.yaml
   - runner.yaml
-# secrets.example.yaml is intentionally NOT listed.
+  - rbac-docs.yaml
+# NOT listed on purpose: secrets.example.yaml.

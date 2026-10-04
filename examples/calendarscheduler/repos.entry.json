@@ -1,0 +1,89 @@
+{
+  "cAImanLabs/cAImanLabsCalendarScheduler": {
+    "mode": "code",
+    "trust": "review",
+    "serviceName": "calendar-scheduler",
+    "targetPath": "src/content/docs/projects/calendar-scheduler",
+    "style": "README / project overview",
+    "exclude": [
+      "apps/landing/**",
+      "packages/screenshots/**",
+      "packages/posthog/**",
+      "**/locales/**",
+      "packages/database/prisma/migrations/**",
+      ".agents/**",
+      ".claude/**",
+      "CLAUDE.md",
+      ".cursorrules",
+      ".mcp.json",
+      "pnpm-lock.yaml",
+      "crowdin.yml",
+      "cicd.json",
+      "assets/**"
+    ],
+    "pages": [
+      {
+        "path": "overview.md",
+        "title": "cAImanScheduler",
+        "kind": "README / project overview",
+        "brief": "What cAImanScheduler is for, how the monorepo is laid out, and how to run it locally and with Docker.",
+        "scope": [
+          "README.md",
+          "package.json",
+          "pnpm-workspace.yaml",
+          "docker-compose.yml",
+          "docker-compose.dev.yml",
+          "apps/web/package.json"
+        ]
+      },
+      {
+        "path": "web-routes.md",
+        "title": "cAImanScheduler web app: routes and pages",
+        "kind": "Architecture overview",
+        "brief": "How the Next.js app routes are organised: the route groups, the pages and layouts, and what each area is for.",
+        "scope": [
+          "apps/web/src/app/**",
+          "apps/web/next.config.*"
+        ]
+      },
+      {
+        "path": "web-features.md",
+        "title": "cAImanScheduler web app: features",
+        "kind": "Architecture overview",
+        "brief": "The feature modules of the web app (polls, spaces, scheduling, billing and others): what each one owns and how they relate.",
+        "scope": [
+          "apps/web/src/features/**"
+        ]
+      },
+      {
+        "path": "api.md",
+        "title": "cAImanScheduler API (tRPC)",
+        "kind": "API documentation",
+        "brief": "The tRPC routers and procedures the web app exposes: inputs, outputs and what each one does.",
+        "scope": [
+          "apps/web/src/trpc/**"
+        ]
+      },
+      {
+        "path": "data-model.md",
+        "title": "cAImanScheduler data model",
+        "kind": "Data and schema reference",
+        "brief": "The database entities, their fields and relationships, as defined by the Prisma schema.",
+        "scope": [
+          "packages/database/prisma/**/*.prisma",
+          "packages/database/src/**"
+        ]
+      }
+    ],
+    "docs": [
+      "apps/docs/**/*.mdx",
+      "apps/docs/**/*.md",
+      "CONTRIBUTING.md",
+      "SECURITY.md"
+    ],
+    "glossary": {
+      "cAImanScheduler": "the product name; always use it",
+      "Rallly": "the upstream project name; never use it in the documentation"
+    }
+  }
+}

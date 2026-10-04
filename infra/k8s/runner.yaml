@@ -6,6 +6,12 @@
 # Create the secret once, by hand (never commit it):
 #   kubectl -n multirepo create secret generic multisync-runner \
 #     --from-literal=ACCESS_TOKEN=<fine-grained PAT: Administration read/write on the central repo>
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: multisync-runner
+  namespace: multirepo
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,11 +26,12 @@ spec:
     metadata:
       labels: { app: multisync-runner }
     spec:
+      serviceAccountName: multisync-runner   # RBAC: infra/k8s/rbac-docs.yaml (rollout of the docs sites only)
       containers:
         - name: runner
           image: myoung34/github-runner:2.321.0   # pin a digest before relying on it in production
           env:
-            - { name: REPO_URL, value: "https://github.com/rubenalejandrocalderoncorona/caimanlabs-portfolio-docs" }
+            - { name: REPO_URL, value: "https://github.com/rubenalejandrocalderoncorona/portfolio" }
             - { name: RUNNER_NAME, value: "multisync-vps" }
             - { name: RUNNER_SCOPE, value: "repo" }
             - { name: LABELS, value: "multisync" }

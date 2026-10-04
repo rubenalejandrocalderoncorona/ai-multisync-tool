@@ -16,6 +16,26 @@ async function generateHypothetical(llm, { filePath, before, after, mode = 'docs
   return llm.chat([{ role: 'system', content: P.loadPrompt('gar').text }, { role: 'user', content: user }], { fast: true });
 }
 
+/**
+ * GAR from the fact sheet: several hypothetical documentation paragraphs (one per topic) written AFTER the
+ * code analysis, so they describe what the docs should say about verified facts rather than guess from raw code.
+ * Each paragraph becomes one retrieval query against the documentation index. Never published, never indexed.
+ * A failure here only degrades retrieval, so it returns [] instead of failing the run.
+ */
+async function generateGarFromFacts(llm, { sheet, brief }) {
+  const prompt = P.loadPrompt('gar-facts');
+  try {
+    const r = await llm.chatJson([
+      { role: 'system', content: prompt.text },
+      { role: 'user', content: `FACT_SHEET:\n${JSON.stringify(sheet.facts.map((f) => ({ id: f.id, text: f.text, kind: f.kind, status: f.status })), null, 1)}\n\nPAGE_BRIEF:\n${brief || '(none)'}` },
+    ], { fast: true });
+    const paragraphs = (Array.isArray(r.paragraphs) ? r.paragraphs : []).filter((x) => typeof x === 'string' && x.trim()).slice(0, 4);
+    return { paragraphs, promptId: prompt.id };
+  } catch (e) {
+    return { paragraphs: [], promptId: prompt.id, error: e.message };
+  }
+}
+
 function findTemplateFiles(dir) {
   const out = [];
   if (!fs.existsSync(dir)) return out;
@@ -46,7 +66,8 @@ async function selectTemplate(llm, { filePath, content, templateFiles, defaultTe
  * mode 'docs': source is a documentation file. mode 'code': source is a code snapshot and `existing` is the live page.
  */
 async function draftDocument(llm, { mode = 'docs', filePath, source, existing = '', changedFiles = [], relatedCode = '', factSheet = '', plan = '', templatePath, context, policy, style, instructions, feedback }) {
-  const template = fs.existsSync(templatePath) ? fs.readFileSync(templatePath, 'utf-8') : '';
+  // Code mode follows the style's own outline; a generic business template would demand sections the code cannot support.
+  const template = mode === 'code' && style?.outline?.length ? P.outlineText(style) : (fs.existsSync(templatePath) ? fs.readFileSync(templatePath, 'utf-8') : '');
   const ctx = context.map((c) => `[${c.heading}] ${c.text.slice(0, 600)}`).join('\n---\n');
   const fix = feedback?.length ? `\n\nA reviewer rejected the previous attempt. Fix exactly these problems:\n- ${feedback.join('\n- ')}` : '';
   const prompt = P.loadPrompt(mode === 'code' ? 'draft-code' : 'draft-docs');
@@ -130,6 +151,7 @@ function withChangeHistory(content, { repo, commit, gaps = [], now = new Date() 
 }
 
 module.exports = {
+  generateGarFromFacts,
   withChangeHistory,
   generateHypothetical, findTemplateFiles, selectTemplate, draftDocument, polishOnly,
   classifyFolder, extractFolderSpec, withFrontmatter, titleFrom,

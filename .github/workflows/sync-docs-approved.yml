@@ -1,8 +1,17 @@
-name: Index Approved Documentation
+name: Review, QA and Promotion
 
-# When a docs-sync PR is merged, a human has approved the final text. Only now does it
-# enter the vector store (keyed by commit hash) and its claims become trusted facts.
-# Closing a PR without merging leaves the index untouched, so drafts never pollute retrieval.
+# The lifecycle of a docs PR after the pipeline opens it:
+#
+#   docs-sync/* PR merged into the QA branch   index the approved text, note the ticket "deployed to QA",
+#                                              open or update the rolling promotion PR  qa -> main
+#   docs-sync/* PR closed without merging      ticket noted, stays open; the index is untouched
+#   promotion PR (qa -> main) merged           every ticket it carries is closed: approved for production
+#   promotion PR closed without merging        tickets noted, stay open
+#
+# Merging into the QA branch deploys the QA site; merging the promotion PR deploys production (docs-site workflow).
+# Drafts never enter the vector store: only text a human merged does.
+#
+# Variables: QA_BRANCH (default qa), PROD_BRANCH (default main), QA_URL (shown in tickets).
 
 on:
   pull_request:
@@ -63,3 +72,105 @@ jobs:
             for f in "${REMOVED[@]}"; do GONE+=("/tmp/removed/$f"); done
             node .multisync/scripts/index_approved.js --delete "${GONE[@]}"
           fi
+
+  # The docs PR is live in QA: note its ticket and open (or extend) the rolling promotion PR.
+  qa:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'docs-sync/')
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.DOCS_SYNC_PAT }}
+      QA_BRANCH: ${{ vars.QA_BRANCH || 'qa' }}
+      PROD_BRANCH: ${{ vars.PROD_BRANCH || 'main' }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PR_BASE: ${{ github.event.pull_request.base.ref }}
+      QA_URL: ${{ vars.QA_URL || 'https://rubenalejandrocalderoncorona.org/documentation/qa/' }}
+    steps:
+      - name: Checkout ai-multysinc-tool
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TOOL_REPO || 'rubenalejandrocalderoncorona/ai-multysinc-tool' }}
+          ref: ${{ vars.TOOL_REF || 'main' }}
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          path: .multisync
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+        working-directory: .multisync
+
+      - name: Note the ticket (deployed to QA)
+        if: env.PR_BASE == env.QA_BRANCH
+        env:
+          CAIMANDESK_URL: ${{ vars.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx' }}
+          CAIMANDESK_API_TOKEN: ${{ secrets.CAIMANDESK_API_TOKEN }}
+          CAIMANDESK_PROJECT_ID: ${{ vars.CAIMANDESK_PROJECT_ID }}
+          CAIMANDESK_TRANSPORT: ${{ vars.CAIMANDESK_TRANSPORT }}
+          CAIMANDESK_MCP_URL: ${{ vars.CAIMANDESK_MCP_URL }}
+        run: node .multisync/scripts/review_ticket.js qa
+
+      - name: Open or extend the promotion PR (QA to production)
+        if: env.PR_BASE == env.QA_BRANCH
+        run: |
+          NEW="- ${PR_TITLE} (${PR_URL})"
+          MARKERS=$(printf '%s' "$PR_BODY" | grep -o '<!-- multisync:ticket=[a-z]*:[0-9]* -->' || true)
+          EXISTING=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$QA_BRANCH" --base "$PROD_BRANCH" --state open --json number -q '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh pr view "$EXISTING" --repo "$GITHUB_REPOSITORY" --json body -q .body > promo-body.md
+            printf '%s\n%s\n' "$NEW" "$MARKERS" >> promo-body.md
+            gh pr edit "$EXISTING" --repo "$GITHUB_REPOSITORY" --body-file promo-body.md
+          else
+            {
+              printf 'Promotes the documentation that has been reviewed in QA to production.\n\n'
+              printf 'Review it in QA first: %s\n\n' "$QA_URL"
+              printf 'Merging this pull request deploys production and closes the tickets below.\n\n'
+              printf '%s\n%s\n' "$NEW" "$MARKERS"
+            } > promo-body.md
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$PROD_BRANCH" --head "$QA_BRANCH" \
+              --title "Promote QA documentation to production" --body-file promo-body.md
+          fi
+
+  # A docs-sync PR closed WITHOUT merging, or a promotion PR closed without merging: note the tickets, keep them open.
+  # A promotion PR (head = QA branch, base = production branch) merged: close every ticket it carries.
+  tickets:
+    if: >-
+      startsWith(github.event.pull_request.head.ref, 'docs-sync/') && github.event.pull_request.merged == false
+      || github.event.pull_request.head.ref == (vars.QA_BRANCH || 'qa') && github.event.pull_request.base.ref == (vars.PROD_BRANCH || 'main')
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout ai-multysinc-tool
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TOOL_REPO || 'rubenalejandrocalderoncorona/ai-multysinc-tool' }}
+          ref: ${{ vars.TOOL_REF || 'main' }}
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          path: .multisync
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+        working-directory: .multisync
+
+      - name: Update the tickets
+        env:
+          MERGED: ${{ github.event.pull_request.merged }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          CAIMANDESK_URL: ${{ vars.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx' }}
+          CAIMANDESK_API_TOKEN: ${{ secrets.CAIMANDESK_API_TOKEN }}
+          CAIMANDESK_PROJECT_ID: ${{ vars.CAIMANDESK_PROJECT_ID }}
+          CAIMANDESK_TRANSPORT: ${{ vars.CAIMANDESK_TRANSPORT }}
+          CAIMANDESK_MCP_URL: ${{ vars.CAIMANDESK_MCP_URL }}
+        run: |
+          if [ "$MERGED" = "true" ]; then ACTION=approve; else ACTION=reject; fi
+          node .multisync/scripts/review_ticket.js "$ACTION"

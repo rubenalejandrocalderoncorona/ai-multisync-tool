@@ -2,19 +2,22 @@
 
 Run `node scripts/doctor.js` at any time. It checks every item below (never printing a secret) and lists what is missing.
 
+See [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md) to connect a repository (worked example: CalendarScheduler into the QA and production documentation site).
+
 ## 1. Status
 
 | Area | Status | Evidence |
 |---|---|---|
-| Qdrant + PostgreSQL in the `multirepo` namespace (k3s on the VPS) | **Verified** | Integration suite (adapters + a full code-mode run with a scripted LLM) passes against both, through an SSH tunnel. It leaves no data behind; the app's schema `multisync` (4 tables) now exists |
-| Pipeline code, both context stages, judge loop, fallback | **Verified** with a scripted LLM | 77 unit/CLI tests + 3 integration tests |
-| **A real run** (OpenAI + the VPS Qdrant and Postgres, repo `rurag`) | **Done once, from a laptop** | Whole repo bootstrapped (13 files, 25 code + 14 semantic chunks); the sync ran every stage, looped once on a recall miss, and produced a page that was checked against the code. See section 7 |
-| CI/CD workflow (`ci.yml`) | Written, lint-clean (`actionlint`), **not yet run on GitHub** | Opens with the first PR |
-| In-cluster GitHub runner | **Missing**: manifest written, needs your token | `infra/k8s/runner.yaml` |
-| LLM key (writer, judge, embeddings) | **Missing** | you provide |
-| cAImanDesk token + project id | **Missing** (API contract verified) | you provide |
-| GitHub secrets/variables on the central repo | **Missing** | section 4 |
-| The same run inside GitHub Actions on the in-cluster runner | **Not done** | section 5 |
+| Qdrant + PostgreSQL in `multirepo` | **Verified** and populated | integration suite passes against them; loaded: `rurag`, CalendarScheduler (625 files, 1,147 code chunks, 217 semantic chunks) and 74 pages of the older docs site |
+| Pipeline: both context stages, GAR, judge loop, coverage check, fallback | **Verified on real data** | 116 unit/CLI tests, 3 integration tests, and real runs on two repos (OpenAI + VPS databases) |
+| Ticketing through Vikunja's built-in MCP | **Verified live** | create, find, comment, close and delete against `tickets.caimanlabs.com.mx` |
+| QA/prod promotion flow (workflows) | Written, `actionlint`-clean, **never run on GitHub** | |
+| Documentation sites at `/documentation` and `/documentation/qa` (build, image, link check) | **Verified locally** | both images served correctly under their base paths |
+| Documentation sites **deployed** | **Done** (2026-10-04) | `docs-prod` and `docs-qa` run in `multirepo` from locally built images; `https://rubenalejandrocalderoncorona.org/documentation/` and `/documentation/qa/` return 200 through Cloudflare and directly at the origin. CI will later replace the local images with GHCR images |
+| CI/CD of the tool | Running on GitHub | unit, integration, lint and secret scan pass; image build fixed (it was missing `prompts/`) |
+| In-cluster GitHub runner | **Missing** | manifest written; needs its token |
+| Secrets and variables on the central repo | **Missing** | section 4 |
+| The same run inside GitHub Actions | **Not done** | |
 
 ## 2. Infrastructure map
 
@@ -25,7 +28,7 @@ flowchart LR
   subgraph GH["GitHub"]
     SRC["Source repos<br/>push to main"]
     SW["sync-docs-source.yml"]
-    CW["Central repo: caimanlabs-portfolio-docs<br/>sync / approved / bootstrap workflows"]
+    CW["Central repo: portfolio<br/>sync / approved / bootstrap workflows"]
     TOOL["ai-multysinc-tool<br/>pipeline code + CI/CD"]
     GHCR["GHCR image<br/>ai-multysinc-pipeline"]
     PR["Review PR<br/>docs-sync/*"]
@@ -121,7 +124,7 @@ Every node writes a row to `multisync.node_logs` and a line to the runner log.
 | 3 | Secret for the runner | `kubectl -n multirepo create secret generic multisync-runner --from-literal=ACCESS_TOKEN=<fine-grained PAT, Administration: read/write on the central repo>` |
 | 4 | Apply | run the **Deploy to cluster** workflow, or `kubectl kustomize infra/k8s \| sed "s#__PIPELINE_IMAGE__#<image>:<tag>#" \| kubectl apply -f -` |
 
-### On the central repo `caimanlabs-portfolio-docs` (Settings > Secrets and variables > Actions)
+### On the central repo `portfolio` (Settings > Secrets and variables > Actions)
 
 | Kind | Name | Required | Value |
 |---|---|---|---|
@@ -134,6 +137,9 @@ Every node writes a row to `multisync.node_logs` and a line to the runner log.
 | variable | `QDRANT_URL` | yes | `http://qdrant:6333` |
 | variable | `RUNNER_LABEL` | yes | `multisync` (the in-cluster runner) |
 | variable | `CAIMANDESK_PROJECT_ID` | yes | number in the cAImanDesk project URL |
+| variable | `CAIMANDESK_TRANSPORT`, `CAIMANDESK_MCP_URL`, `CAIMANDESK_PUBLIC_URL` | no | default transport is `mcp` (Vikunja's built-in MCP, `<CAIMANDESK_URL>/api/v2/mcp`); set `CAIMANDESK_URL` to the in-cluster service and `CAIMANDESK_PUBLIC_URL` to the public address when running on the in-cluster runner |
+| variable | `REVIEW_ENVIRONMENT_NAME`, `QA_URL`, `QA_BRANCH`, `PROD_BRANCH` | no | defaults `QA`, `https://rubenalejandrocalderoncorona.org/documentation/qa/`, `qa`, `main` |
+| variable | `DEPLOY_ENABLED` | for deploys | `true` once `deploy/k8s.yaml` has been applied; until then the site deploy job is skipped |
 | variable | `AI_API_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL`, `AI_EMBED_MODEL`, `AI_EMBED_DIM` | no | defaults: OpenAI, `gpt-4o`, `gpt-4o-mini`, `text-embedding-3-small`, `1536` (`AI_EMBED_DIM` must match the embedding model) |
 | variable | `TOOL_REPO`, `TOOL_REF` | no | defaults: this repo, `main` |
 

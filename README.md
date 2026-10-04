@@ -45,6 +45,20 @@ Then two separate LLM stages read that context:
 
 The writer follows the plan; the judge checks every claim against the code (including the related code) and checks coverage against the plan. A widened retry re-runs both stages with a bigger budget. Load a repo ahead of time with `npm run bootstrap -- --repo owner/name --dir <checkout>` or the **Bootstrap Context** workflow.
 
+### Seeing and checking the context
+
+```bash
+node scripts/context_search.js --status                                            # what is loaded, per repo and kind
+node scripts/context_search.js --repo owner/name --query "how are polls created"   # what a code/semantic query retrieves
+node scripts/context_search.js --repo owner/name --gar "Participants pick the times that work for them."   # GAR-style query
+```
+
+- **Semantic sources.** Besides the repo's README and `docs/`, a repo can list extra existing documentation in `docs` globs (for example an end-user docs app), and the pages of the central documentation site itself are indexed as `site_doc` (`SITE_REPO` + `SITE_DIR`, or `bootstrap_context.js --site-dir`). Everything is searched with the GAR paragraphs.
+- **Relevance floor.** Retrieved chunks below `CONTEXT_MIN_SCORE` (0.45) are dropped; the page brief is always kept. This stops marginal matches (for example an upstream project's troubleshooting text) leaking into a page.
+- **What the run used.** Each decision records the GAR queries, the facts found, the code and semantic chunks retrieved with their scores, and how many of the in-scope files the page was based on. The job summary prints it, so a wrong `scope` is visible in review.
+- **Deterministic completeness.** Styles for which completeness is the point (`Data and schema reference`, `Configuration reference`) carry a `coverage` rule: every model, enum, table or environment variable declared in the code must appear in the page, or the draft fails with the exact missing names. The LLM judge cannot do this reliably, because it only checks completeness against the facts it chose to list.
+- **Regenerating one page.** `ONLY_PAGES=data-model.md FULL_SYNC=1` regenerates just those pages while the whole config's context stays loaded.
+
 ### Two modes
 
 | `mode` in `config/repos.json` | Source of truth | Typical repo |
@@ -108,9 +122,13 @@ A failed run records `reviewer_action = auto_rejected` with a `root_cause_tag` (
 | `trust: review` | **only when the PR is merged** (`sync-docs-approved.yml`), keyed by commit hash |
 | draft, rejected, GAR text | never |
 
+### Review flow and tickets
+
+A passing run opens a pull request (the QA stage). A review ticket in cAImanDesk tracks it: opened with the PR link and judge scores, closed when the PR is merged (that is the approval), noted but left open if the PR is closed unmerged. Failed runs open fallback tickets. See [docs/INTEGRATE-A-REPO.md](docs/INTEGRATE-A-REPO.md) for the full flow and how to connect a repo.
+
 ### Ticketing (cAImanDesk)
 
-`https://tickets.caimanlabs.com.mx` is a Vikunja v2 deployment, so tickets are created through its REST API: `PUT /api/v1/projects/{id}/tasks` with a Bearer API token. Set `CAIMANDESK_API_TOKEN` (an API token allowed to create tasks) and `CAIMANDESK_PROJECT_ID`. A repeat failure for the same repo, file and root cause adds a comment to the open task instead of creating a duplicate. Ticket creation never blocks or fails a run.
+Tickets go through either the cAImanDesk MCP server (`CAIMANDESK_TRANSPORT=mcp`) or the Vikunja REST API (default). The REST path: `https://tickets.caimanlabs.com.mx` is a Vikunja v2 deployment: `PUT /api/v1/projects/{id}/tasks` with a Bearer API token. Set `CAIMANDESK_API_TOKEN` (an API token allowed to create tasks) and `CAIMANDESK_PROJECT_ID`. A repeat failure for the same repo, file and root cause adds a comment to the open task instead of creating a duplicate. Ticket creation never blocks or fails a run.
 
 ## Demo
 
@@ -121,6 +139,10 @@ npm run demo             # live: real LLM + embeddings, Qdrant, Postgres, cAIman
 
 Five scenarios, each printing its stage trail: first publish, near-duplicate (cosine short-circuit, no LLM), structural change (overrides similarity), cross-repo block (fallback + ticket, no LLM), and judge fallback (precision forced above 1.0, so the loop widens and escalates + ticket). The live demo needs the variables in `.env.example`; `SIMILARITY_HIGH` defaults to 0.85 there and must be calibrated against real embeddings.
 
+## Onboarding a repository
+
+[docs/ONBOARD-A-REPO.md](docs/ONBOARD-A-REPO.md): declare the repo, run the free dry run (`scripts/onboard_check.js`: what would be indexed, the embedding cost, what each page can actually see, sensitive files), load its embeddings with Bootstrap Context, verify with `context_search.js`, run one page, then connect the source workflow.
+
 ## CI/CD
 
 `.github/workflows/ci.yml` runs on every PR and push: unit and CLI tests, **integration tests against real Qdrant and Postgres service containers**, workflow lint (`actionlint`), compose and kustomize validation, a secret scan, an image build and smoke test; pushes to `main` publish `ghcr.io/<owner>/ai-multysinc-pipeline` with build provenance. `deploy-cluster.yml` (manual, behind an Environment approval) applies `infra/k8s` to the VPS cluster. Run the integration tests yourself with `QDRANT_URL=... FACTSTORE_DATABASE_URL=... npm run test:integration`; they use unique names and clean up, so they are safe to point at a shared instance.
@@ -130,7 +152,7 @@ Five scenarios, each printing its stage trail: first publish, near-duplicate (co
 | Path | Purpose |
 |---|---|
 | `pipeline/` | the decision pipeline (config, llm, structure, prefilter, vectorstore, factstore, registry, writer, critic, fallback) |
-| `scripts/` | CLI entry points: `run_pipeline.js`, `bootstrap_context.js`, `index_approved.js`, `healthcheck.js`, `doctor.js`, `generate-summary.js`, `demo.js` |
+| `scripts/` | CLI entry points: `run_pipeline.js`, `bootstrap_context.js`, `onboard_check.js`, `context_search.js`, `index_approved.js`, `healthcheck.js`, `doctor.js`, `generate-summary.js`, `demo.js` |
 | `config/repos.json` | per-repo trust level, docs folder, style guide, glossary |
 | `config/feature-registry.json` | contract-point symbol → repos that must also ship |
 | `infra/` | docker-compose stack, k8s manifests for the `multirepo` namespace (migrate Job, in-cluster runner) and a standalone variant |

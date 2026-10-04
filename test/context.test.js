@@ -280,3 +280,216 @@ test('judge: coreRecall is computed from facts flagged core', async () => {
   assert.deepStrictEqual(v.missingCore, ['b']);
   assert.strictEqual(Math.round(v.recall * 100), 33);
 });
+
+// ── GAR proper: hypothetical docs from the fact sheet drive semantic retrieval ──
+test('GAR (code mode): paragraphs are written from the FACT SHEET, after stage 1, and each is a query against the docs index', async () => {
+  const llm = fakeLLM({ judges: [passJudge] });
+  const embedded = [];
+  const origEmbed = llm.embed.bind(llm);
+  llm.embed = async (t) => { embedded.push(...t); return origEmbed(t); };
+  const d = await processChange(unit(), makeDeps({ llm }));
+  const names = d.trail.map((t) => t.node);
+  assert.ok(names.indexOf('code_context') < names.indexOf('gar'), 'GAR runs after the fact sheet exists');
+  const gar = d.trail.find((t) => t.node === 'gar').note;
+  assert.strictEqual(gar.garParagraphs, 2, 'blank paragraphs are dropped');
+  assert.strictEqual(llm.calls.garFacts, 1);
+  assert.ok(embedded.some((e) => e.startsWith('The service listens on a configurable port')), 'paragraph 1 embedded as a retrieval query');
+  assert.ok(embedded.some((e) => e.startsWith('Alerts can be silenced by id')), 'paragraph 2 embedded as a retrieval query');
+  const sc = d.trail.find((t) => t.node === 'semantic_context').note;
+  assert.strictEqual(sc.garQueries, 2);
+  assert.strictEqual(sc.queries, 5);
+});
+
+test('GAR: hypothetical text is never written to either index', async () => {
+  const deps = makeDeps({ policy: { trust: 'auto', serviceName: 'p', styleGuide: '', glossary: {} } });
+  await processChange(unit(), deps);
+  const all = [...deps.vectors.points.values(), ...deps.codeVectors.points.values()].map((p) => p.payload.text).join('\n');
+  assert.ok(!all.includes('configurable port and is configured through environment variables'));
+});
+
+test('GAR: a failure only degrades retrieval, it does not fail the run', async () => {
+  const llm = fakeLLM({ judges: [passJudge] });
+  const orig = llm.chatJson.bind(llm);
+  llm.chatJson = async (m) => { if (m[0].content.includes('HYPOTHETICAL documentation')) throw new Error('boom'); return orig(m); };
+  const d = await processChange(unit(), makeDeps({ llm }));
+  assert.strictEqual(d.outcome, 'pending_review');
+  const gar = d.trail.find((t) => t.node === 'gar').note;
+  assert.strictEqual(gar.garParagraphs, 0);
+  assert.strictEqual(gar.garError, 'boom');
+});
+
+test('GAR: docs mode does not run the fact-sheet GAR (no extra cost)', async () => {
+  const llm = fakeLLM({ judges: [passJudge] });
+  const d = await processChange({ repo: 'o/r', filePath: 'docs/a.md', commit: 'abc', before: '## A\n\nx\n', after: '## A\n\nx\n\n- one\n- two\n- three\n' }, makeDeps({ llm }));
+  assert.ok(!llm.calls.garFacts);
+  assert.strictEqual(d.trail.find((t) => t.node === 'gar').note.garParagraphs, 0);
+});
+
+// ── semantic sources, site docs, visibility, search ──────────────────────────
+const { syncSite } = require('../pipeline/context');
+const { searchContext, contextStatus } = require('../scripts/context_search');
+const { siteFiles } = require('../scripts/sitedocs');
+const fsx = require('node:fs'); const osx = require('node:os'); const pathx = require('node:path');
+
+test('syncContext: `docs` globs index existing documentation (outside the code scope) as semantic context; exclude still wins', async () => {
+  const s = setup();
+  const tree = { c1: { 'src/a.go': 'package main\nfunc A() {}\n', 'apps/docs/guide/polls.mdx': '# Polls\n\nA poll lets people vote on times.\n', 'apps/docs/secret/internal.mdx': '# Internal\n\nrestricted\n', 'CONTRIBUTING.md': '# Contributing\n\nopen a PR\n' } };
+  await syncContext({ repo: 'o/r', commit: 'c1', before: '', git: repoOf(tree), ...s, pages: [{ path: 'o.md', scope: ['src/**'] }], scope: ['src/**'], docs: ['apps/docs/**/*.mdx', 'CONTRIBUTING.md'], exclude: ['apps/docs/secret/**'] });
+  const docPaths = [...s.docStore.points.values()].map((p) => p.payload.path);
+  assert.ok(docPaths.includes('apps/docs/guide/polls.mdx') && docPaths.includes('CONTRIBUTING.md'));
+  assert.ok(!docPaths.some((p) => p.includes('secret')), 'excluded docs are never indexed');
+  assert.deepStrictEqual([...new Set([...s.codeStore.points.values()].map((p) => p.payload.path))], ['src/a.go'], 'docs do not leak into the code collection');
+});
+
+test('syncSite: indexes the documentation site once per commit, under its own key, and skips when unchanged', async () => {
+  const s = setup();
+  const pages = { 'src/content/docs/guides/a.md': '## Alpha\n\nAlpha explains the alert API.\n', 'src/content/docs/guides/b.md': '## Beta\n\nBeta explains deployment.\n' };
+  const args = { siteRepo: 'o/docs', commit: 's1', files: Object.keys(pages), readFile: (f) => pages[f], docStore: s.docStore, llm: s.llm, facts: s.facts };
+  const first = await syncSite(args);
+  assert.strictEqual(first.skipped, false);
+  assert.strictEqual(first.pages, 2);
+  assert.ok([...s.docStore.points.values()].every((p) => p.payload.repo === 'site:o/docs' && p.payload.kind === 'site_doc'));
+  const embeds = s.llm.calls.embed;
+  assert.strictEqual((await syncSite(args)).skipped, true);
+  assert.strictEqual(s.llm.calls.embed, embeds, 'no re-embedding when the site commit is unchanged');
+  await syncSite({ ...args, commit: 's2', files: ['src/content/docs/guides/a.md'] });
+  assert.ok(![...s.docStore.points.values()].some((p) => p.payload.path.endsWith('b.md')), 'removed pages leave the index');
+});
+
+test('retrieveSemantic: with a siteRepo it also returns pages from the rest of the documentation site', async () => {
+  const s = setup();
+  await syncContext({ repo: 'o/r', commit: 'c1', before: '', git: repoOf(T), ...s, pages: [{ path: 'overview.md', brief: 'Explain alerting.' }] });
+  await syncSite({ siteRepo: 'o/docs', commit: 's1', files: ['src/content/docs/g.md'], readFile: () => '## Alerting\n\nHow alerting works across the platform.\n', docStore: s.docStore, llm: s.llm, facts: s.facts });
+  const without = await retrieveSemantic({ llm: s.llm, store: s.docStore, repo: 'o/r', queries: ['alerting platform'], topK: 5 });
+  assert.ok(!without.some((h) => h.kind === 'site_doc'));
+  const withSite = await retrieveSemantic({ llm: s.llm, store: s.docStore, repo: 'o/r', queries: ['alerting platform'], topK: 5, siteRepo: 'o/docs' });
+  assert.ok(withSite.some((h) => h.kind === 'site_doc' && h.path === 'src/content/docs/g.md'));
+});
+
+test('siteFiles: reads Starlight pages and skips the folders the pipeline itself writes', () => {
+  const dir = fsx.mkdtempSync(pathx.join(osx.tmpdir(), 'site-'));
+  for (const f of ['guides/a.md', 'ci-cd/b.mdx', 'projects/x/overview.md', 'services/y/z.md', 'notes.txt']) { fsx.mkdirSync(pathx.dirname(pathx.join(dir, 'src/content/docs', f)), { recursive: true }); fsx.writeFileSync(pathx.join(dir, 'src/content/docs', f), '# x\n'); }
+  assert.deepStrictEqual(siteFiles(dir), ['src/content/docs/ci-cd/b.mdx', 'src/content/docs/guides/a.md']);
+  fsx.rmSync(dir, { recursive: true, force: true });
+});
+
+test('context search + status make the database inspectable', async () => {
+  const s = setup();
+  await syncContext({ repo: 'o/r', commit: 'c1', before: '', git: repoOf(T), ...s, pages: [{ path: 'overview.md', brief: 'Explain alerting.' }] });
+  await syncSite({ siteRepo: 'o/docs', commit: 's1', files: ['p.md'], readFile: () => '## P\n\ntext\n', docStore: s.docStore, llm: s.llm, facts: s.facts });
+  const r = await searchContext({ llm: s.llm, codeStore: s.codeStore, docStore: s.docStore, repo: 'o/r', query: 'func Alert', k: 3 });
+  assert.ok(r.code.length >= 1 && r.code[0].path.startsWith('src/'));
+  assert.ok(r.semantic.length >= 1);
+  const only = await searchContext({ llm: s.llm, codeStore: s.codeStore, docStore: s.docStore, repo: 'o/r', query: 'func Alert', kind: 'code' });
+  assert.strictEqual(only.semantic, undefined);
+  const rows = await contextStatus({ codeStore: s.codeStore, docStore: s.docStore, facts: s.facts });
+  const repoRow = rows.find((x) => x.repo === 'o/r');
+  assert.strictEqual(repoRow.code, 2);
+  assert.strictEqual(repoRow.source_doc >= 1, true);
+  assert.strictEqual(repoRow.brief, 1);
+  assert.strictEqual(rows.find((x) => x.repo === 'site:o/docs').site_doc, 1);
+});
+
+test('graph (code mode): the decision records exactly which context was retrieved and which GAR queries were used', async () => {
+  const deps = makeDeps({ llm: fakeLLM({ judges: [passJudge] }) });
+  await syncContext({ repo: 'o/r', commit: 'c0', before: '', git: repoOf({ c0: { 'src/b.go': 'package main\nfunc Other() { Alert() }\n', 'README.md': '# Proj\n\nAlert service docs.\n' } }), codeStore: deps.codeVectors, docStore: deps.vectors, llm: deps.llm, facts: deps.facts });
+  deps.siteRepo = 'o/docs';
+  const d = await processChange(unit(), deps);
+  assert.ok(d.context.code.length >= 1 && d.context.code[0].path === 'src/b.go' && typeof d.context.code[0].score === 'number');
+  assert.ok(d.context.semantic.length >= 1);
+  assert.deepStrictEqual(d.context.facts.map((f) => f.id), ['F1', 'F2']);
+  assert.strictEqual(d.context.gar.length, 2);
+  assert.ok(d.context.plan.length === 2);
+  assert.ok(d.trail.find((t) => t.node === 'code_context').note.relatedTop[0].startsWith('src/b.go:'));
+});
+
+// ── relevance floor, outlines, lean code-mode standards ──────────────────────
+test('retrieval floor: marginal matches are dropped, but the page brief is always kept', async () => {
+  const s = setup();
+  await syncContext({ repo: 'o/r', commit: 'c1', before: '', git: repoOf(T), ...s, pages: [{ path: 'overview.md', brief: 'zzz qqq unrelated words' }] });
+  const loose = await retrieveCode({ llm: s.llm, store: s.codeStore, repo: 'o/r', queries: ['func Alert'], topK: 10 });
+  const strict = await retrieveCode({ llm: s.llm, store: s.codeStore, repo: 'o/r', queries: ['func Alert'], topK: 10, minScore: 0.999 });
+  assert.ok(loose.length >= 1);
+  assert.strictEqual(strict.length, 0);
+  const sem = await retrieveSemantic({ llm: s.llm, store: s.docStore, repo: 'o/r', queries: ['completely different topic about bananas'], topK: 10, minScore: 0.999 });
+  assert.deepStrictEqual(sem.map((x) => x.kind), ['brief'], 'only the brief survives a strict floor');
+});
+
+test('code mode writes to the style OUTLINE, skips template selection, and uses lean standards (no required References/Troubleshooting)', async () => {
+  const llm = fakeLLM({ judges: [passJudge] });
+  const deps = makeDeps({ llm });
+  const d = await processChange(unit({ styleKey: 'Data and schema reference' }), deps);
+  const draftIn = llm.calls.drafts[0];
+  assert.match(draftIn, /OUTLINE \(follow this order[^)]*\):\n## Overview\n## Entities/);
+  assert.ok(!draftIn.includes('[Default Template]'), 'the generic business template is not used in code mode');
+  assert.strictEqual(d.trail.find((t) => t.node === 'gar').note.template, 'outline:Data and schema reference');
+  assert.match(llm.calls.planInputs[0], /TEMPLATE:\nOUTLINE/);
+});
+
+test('docs mode is unchanged: it still selects and applies a template', async () => {
+  const llm = fakeLLM({ judges: [passJudge] });
+  const d = await processChange({ repo: 'o/r', filePath: 'docs/a.md', commit: 'abc', before: '## A\n\nx\n', after: '## A\n\nx\n\n- one\n- two\n- three\n' }, makeDeps({ llm }));
+  assert.match(d.trail.find((t) => t.node === 'gar').note.template, /default-template/);
+});
+
+test('every bundled style has an outline, and the lean standards forbid the sections that broke the first CalendarScheduler run', () => {
+  const lib = require('../pipeline/prompts').loadStyles();
+  for (const [k, v] of Object.entries(lib.styles)) assert.ok(Array.isArray(v.outline) && v.outline.length >= 1, `${k} outline`);
+  const std = require('../pipeline/prompts').loadPrompt('standards-code').text;
+  assert.match(std, /Do not write a Change History section, a Classification section, a References section/);
+});
+
+test('judge prompts tell the model to ignore statements about the document itself', () => {
+  for (const n of ['judge-docs', 'judge-code']) assert.match(require('../pipeline/prompts').loadPrompt(n).text, /Statements about the document itself/);
+});
+
+test('the decision records which files the page was based on (so a wrong scope is visible in review)', async () => {
+  const deps = makeDeps({ llm: fakeLLM({ judges: [passJudge] }) });
+  const d = await processChange(unit({ snapshotFiles: ['src/a.go'], repoMap: ['src/a.go', 'src/b.go', 'src/c.go'] }), deps);
+  assert.deepStrictEqual(d.context.snapshot, { files: ['src/a.go'], count: 1, chars: unit().after.length, scoped: 3 });
+  const note = d.trail.find((t) => t.node === 'code_context').note;
+  assert.strictEqual(note.basedOnFiles, 1);
+  assert.strictEqual(note.scopedFiles, 3);
+});
+
+// ── deterministic completeness ───────────────────────────────────────────────
+const { checkCoverage } = require('../pipeline/coverage');
+const PRISMA = 'model User {\n  id String\n}\nmodel Poll {\n  id String\n}\nenum PollStatus {\n  open\n}\nmodel Vote {\n  id String\n}\n';
+
+test('coverage: finds every declared model/enum and reports what the page omits', () => {
+  const spec = { kinds: ['prisma_model', 'prisma_enum'], min: 0.9 };
+  const c = checkCoverage('### User\n\n### Poll\n\nUses `PollStatus`.', PRISMA, spec);
+  assert.deepStrictEqual(c.kinds, { prisma_model: { total: 3, found: 2 }, prisma_enum: { total: 1, found: 1 } });
+  // the same name matched by two extractors counts once
+  assert.strictEqual(checkCoverage('User', PRISMA, { kinds: ['prisma_enum', 'graphql_type'], min: 1 }).kinds.graphql_type.total, 0);
+  assert.deepStrictEqual(c.missing, ['prisma_model:Vote']);
+  assert.strictEqual(c.ok, false);
+  assert.strictEqual(checkCoverage('User Poll Vote PollStatus', PRISMA, spec).ok, true);
+});
+
+test('coverage: whole-word matching (a name inside another word does not count), and no declarations means nothing to enforce', () => {
+  assert.strictEqual(checkCoverage('Voted and Poller', PRISMA, { kinds: ['prisma_model'], min: 1 }).kinds.prisma_model.found, 0);
+  assert.strictEqual(checkCoverage('anything', 'no models here', { kinds: ['prisma_model'] }), null);
+  assert.strictEqual(checkCoverage('x', PRISMA, undefined), null);
+  assert.deepStrictEqual(checkCoverage('API_KEY', 'const a = process.env.API_KEY; const b = process.env.DATABASE_URL;', { kinds: ['env_var'], min: 0.5 }).missing, ['env_var:DATABASE_URL']);
+});
+
+test('graph: a schema page that omits declared models fails with incomplete_coverage and the exact names are fed back', async () => {
+  const code = `### FILE: schema.prisma\n${PRISMA}`;
+  const llm = fakeLLM({ judges: [passJudge], draft: '## Overview\n\nThe database has a User entity and a Poll entity with many fields documented here in detail.\n\n## Entities\n\n### User\n\n### Poll\n\n## Enumerations\n\n### PollStatus\n' });
+  const d = await processChange(unit({ after: code, before: null, styleKey: 'Data and schema reference', changedFiles: ['schema.prisma'] }), makeDeps({ llm, env: { MAX_ITERATIONS: '2' } }));
+  assert.strictEqual(d.outcome, 'fallback');
+  const j = d.trail.filter((t) => t.node === 'judge');
+  assert.strictEqual(j[0].note.failure, 'incomplete_coverage');
+  assert.deepStrictEqual(j[0].note.coverage.prisma_model, '2/3');
+  assert.deepStrictEqual(j[0].note.coverageMissing, ['prisma_model:Vote']);
+  assert.match(llm.calls.drafts[1], /Add every one of: Vote/, 'the next attempt is told exactly what is missing');
+});
+
+test('graph: when the page names every declared model, coverage passes and the page publishes', async () => {
+  const code = `### FILE: schema.prisma\n${PRISMA}`;
+  const llm = fakeLLM({ judges: [passJudge], draft: '## Overview\n\nThe database layer in this project stores users and polls.\n\n## Entities\n\n### User\n\n### Poll\n\n### Vote\n\n## Enumerations\n\n### PollStatus\n' });
+  const d = await processChange(unit({ after: code, before: null, styleKey: 'Data and schema reference', changedFiles: ['schema.prisma'] }), makeDeps({ llm }));
+  assert.strictEqual(d.outcome, 'pending_review');
+  assert.strictEqual(d.trail.find((t) => t.node === 'judge').note.coverage.prisma_model, '3/3');
+});

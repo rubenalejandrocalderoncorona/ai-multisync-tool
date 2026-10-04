@@ -140,3 +140,32 @@ test('LLM retry: 5xx and network errors are retried; 400/401 are not; gives up a
   await assert.rejects(new LLM(cfgAi, async () => { always++; return resp(429, 'slow down'); }, async () => {}).chat([{ role: 'user', content: 'x' }]), /AI API 429/);
   assert.strictEqual(always, 4, '1 try + 3 retries');
 });
+
+test('Qdrant: a large upsert is split into batches (a single request over 32 MB is rejected by the server)', async () => {
+  const { f, calls } = recorder(() => ({ json: {} }));
+  const q = new QdrantStore({ url: 'http://q', collection: 'docs' }, 3, f);
+  await q.upsert(Array.from({ length: 600 }, (_, i) => ({ id: String(i), vector: [1, 0, 0], payload: {} })));
+  const puts = calls.filter((c) => c.method === 'PUT');
+  assert.deepStrictEqual(puts.map((c) => c.body.points.length), [256, 256, 88]);
+  await q.upsert([]);
+  assert.strictEqual(calls.filter((c) => c.method === 'PUT').length, 3, 'an empty upsert sends nothing');
+});
+
+test('Qdrant: transient failures (408, 503, network error) are retried; a 400 is not', async () => {
+  let n = 0;
+  const flaky = async () => { n++; if (n === 1) throw new Error('fetch failed'); if (n === 2) return { ok: false, status: 408, text: async () => '' }; if (n === 3) return { ok: false, status: 503, text: async () => 'busy' }; return { ok: true, status: 200, text: async () => JSON.stringify({ result: [] }) }; };
+  const q = new QdrantStore({ url: 'http://q', collection: 'docs' }, 3, flaky);
+  // speed: patch the sleep through the options argument
+  assert.deepStrictEqual((await q._req('POST', '/x', {}, { sleep: async () => {} })).result, []);
+  assert.strictEqual(n, 4);
+
+  let bad = 0;
+  const q2 = new QdrantStore({ url: 'http://q', collection: 'docs' }, 3, async () => { bad++; return { ok: false, status: 400, text: async () => 'bad request' }; });
+  await assert.rejects(q2._req('POST', '/x', {}, { sleep: async () => {} }), /-> 400/);
+  assert.strictEqual(bad, 1, 'a 400 is never retried');
+
+  let always = 0;
+  const q3 = new QdrantStore({ url: 'http://q', collection: 'docs' }, 3, async () => { always++; return { ok: false, status: 503, text: async () => 'x' }; });
+  await assert.rejects(q3._req('POST', '/x', {}, { retries: 2, sleep: async () => {} }), /-> 503/);
+  assert.strictEqual(always, 3, '1 try + 2 retries');
+});
