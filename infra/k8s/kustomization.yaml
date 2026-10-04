@@ -7,5 +7,5 @@ namespace: multirepo
 resources:
   - migrate-job.yaml
   - runner.yaml
-# NOT listed on purpose: secrets.example.yaml, and rbac-personal.yaml (it targets the `personal` namespace and must be
-# applied on its own: `kubectl apply -f infra/k8s/rbac-personal.yaml`).
+  - rbac-docs.yaml
+# NOT listed on purpose: secrets.example.yaml.

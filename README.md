@@ -139,6 +139,10 @@ npm run demo             # live: real LLM + embeddings, Qdrant, Postgres, cAIman
 
 Five scenarios, each printing its stage trail: first publish, near-duplicate (cosine short-circuit, no LLM), structural change (overrides similarity), cross-repo block (fallback + ticket, no LLM), and judge fallback (precision forced above 1.0, so the loop widens and escalates + ticket). The live demo needs the variables in `.env.example`; `SIMILARITY_HIGH` defaults to 0.85 there and must be calibrated against real embeddings.
 
+## Onboarding a repository
+
+[docs/ONBOARD-A-REPO.md](docs/ONBOARD-A-REPO.md): declare the repo, run the free dry run (`scripts/onboard_check.js`: what would be indexed, the embedding cost, what each page can actually see, sensitive files), load its embeddings with Bootstrap Context, verify with `context_search.js`, run one page, then connect the source workflow.
+
 ## CI/CD
 
 `.github/workflows/ci.yml` runs on every PR and push: unit and CLI tests, **integration tests against real Qdrant and Postgres service containers**, workflow lint (`actionlint`), compose and kustomize validation, a secret scan, an image build and smoke test; pushes to `main` publish `ghcr.io/<owner>/ai-multysinc-pipeline` with build provenance. `deploy-cluster.yml` (manual, behind an Environment approval) applies `infra/k8s` to the VPS cluster. Run the integration tests yourself with `QDRANT_URL=... FACTSTORE_DATABASE_URL=... npm run test:integration`; they use unique names and clean up, so they are safe to point at a shared instance.
@@ -148,7 +152,7 @@ Five scenarios, each printing its stage trail: first publish, near-duplicate (co
 | Path | Purpose |
 |---|---|
 | `pipeline/` | the decision pipeline (config, llm, structure, prefilter, vectorstore, factstore, registry, writer, critic, fallback) |
-| `scripts/` | CLI entry points: `run_pipeline.js`, `bootstrap_context.js`, `index_approved.js`, `healthcheck.js`, `doctor.js`, `generate-summary.js`, `demo.js` |
+| `scripts/` | CLI entry points: `run_pipeline.js`, `bootstrap_context.js`, `onboard_check.js`, `context_search.js`, `index_approved.js`, `healthcheck.js`, `doctor.js`, `generate-summary.js`, `demo.js` |
 | `config/repos.json` | per-repo trust level, docs folder, style guide, glossary |
 | `config/feature-registry.json` | contract-point symbol → repos that must also ship |
 | `infra/` | docker-compose stack, k8s manifests for the `multirepo` namespace (migrate Job, in-cluster runner) and a standalone variant |

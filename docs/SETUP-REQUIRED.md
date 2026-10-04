@@ -13,7 +13,7 @@ See [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md) to connect a repository (worked e
 | Ticketing through Vikunja's built-in MCP | **Verified live** | create, find, comment, close and delete against `tickets.caimanlabs.com.mx` |
 | QA/prod promotion flow (workflows) | Written, `actionlint`-clean, **never run on GitHub** | |
 | Documentation sites at `/documentation` and `/documentation/qa` (build, image, link check) | **Verified locally** | both images served correctly under their base paths |
-| Documentation sites **deployed** | **Not done** | `deploy/k8s.yaml` and RBAC are written, nothing applied |
+| Documentation sites **deployed** | **Done** (2026-10-04) | `docs-prod` and `docs-qa` run in `multirepo` from locally built images; `https://rubenalejandrocalderoncorona.org/documentation/` and `/documentation/qa/` return 200 through Cloudflare and directly at the origin. CI will later replace the local images with GHCR images |
 | CI/CD of the tool | Running on GitHub | unit, integration, lint and secret scan pass; image build fixed (it was missing `prompts/`) |
 | In-cluster GitHub runner | **Missing** | manifest written; needs its token |
 | Secrets and variables on the central repo | **Missing** | section 4 |
@@ -28,7 +28,7 @@ flowchart LR
   subgraph GH["GitHub"]
     SRC["Source repos<br/>push to main"]
     SW["sync-docs-source.yml"]
-    CW["Central repo: caimanlabs-portfolio-docs<br/>sync / approved / bootstrap workflows"]
+    CW["Central repo: portfolio<br/>sync / approved / bootstrap workflows"]
     TOOL["ai-multysinc-tool<br/>pipeline code + CI/CD"]
     GHCR["GHCR image<br/>ai-multysinc-pipeline"]
     PR["Review PR<br/>docs-sync/*"]
@@ -124,7 +124,7 @@ Every node writes a row to `multisync.node_logs` and a line to the runner log.
 | 3 | Secret for the runner | `kubectl -n multirepo create secret generic multisync-runner --from-literal=ACCESS_TOKEN=<fine-grained PAT, Administration: read/write on the central repo>` |
 | 4 | Apply | run the **Deploy to cluster** workflow, or `kubectl kustomize infra/k8s \| sed "s#__PIPELINE_IMAGE__#<image>:<tag>#" \| kubectl apply -f -` |
 
-### On the central repo `caimanlabs-portfolio-docs` (Settings > Secrets and variables > Actions)
+### On the central repo `portfolio` (Settings > Secrets and variables > Actions)
 
 | Kind | Name | Required | Value |
 |---|---|---|---|
