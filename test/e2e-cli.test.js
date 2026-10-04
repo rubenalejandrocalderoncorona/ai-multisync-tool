@@ -52,7 +52,7 @@ test('CLI code mode end to end: real git repo -> graph -> page on disk -> result
     const r = await run('node', [path.join(__dirname, '../scripts/run_pipeline.js')], { cwd: work, env });
     assert.strictEqual(r.code, 0, r.out);
     assert.match(r.out, /mode=code \| 1 change unit/);
-    for (const node of ['sync_context', 'prefilter', 'cross_repo', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'judge', 'publish']) assert.match(r.out, new RegExp(`\\[${node}\\]`));
+    for (const node of ['sync_context', 'prefilter', 'cross_repo', 'route', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'verify_draft', 'judge', 'publish']) assert.match(r.out, new RegExp(`\\[${node}\\]`));
     assert.match(r.out, /\[sync_context\] ok \d+ms \{"mode":"full","reason":"no previous commit"|\[sync_context\] ok \d+ms \{"mode":"full"/);
 
     const results = JSON.parse(fs.readFileSync(path.join(work, 'pipeline-results.json'), 'utf-8'));
@@ -61,7 +61,7 @@ test('CLI code mode end to end: real git repo -> graph -> page on disk -> result
     assert.strictEqual(d.outcome, 'published');
     assert.strictEqual(d.mode, 'code');
     assert.strictEqual(d.style, 'API documentation');
-    assert.deepStrictEqual(d.stages.map((s) => s.split(':')[0]), ['prefilter', 'cross_repo', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'judge', 'publish']);
+    assert.deepStrictEqual(d.stages.map((s) => s.split(':')[0]), ['prefilter', 'cross_repo', 'route', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'verify_draft', 'judge', 'publish']);
 
     const page = fs.readFileSync(path.join(work, d.targetPath), 'utf-8');
     assert.match(d.targetPath, /^site\/docs\/services\/proj\/api\.md$/);

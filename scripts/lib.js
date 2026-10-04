@@ -5,6 +5,7 @@ const { LLM } = require('../pipeline/llm');
 const { QdrantStore, MemoryVectorStore } = require('../pipeline/vectorstore');
 const { createFactStore } = require('../pipeline/factstore');
 const { indexApproved } = require('../pipeline/vectorstore');
+const { recordDocRefs } = require('../pipeline/context');
 const fs = require('fs');
 const path = require('path');
 
@@ -39,6 +40,7 @@ async function applyDecision(decision, { d, repo, file, commit }) {
     if (decision.action === 'write') {
       await indexApproved({ store: d.vectors, llm: d.llm, repo, filePath: file, content: decision.content, commit });
       await d.facts.approveClaims(repo, file, commit);
+      if (d.facts.knownSymbolNames) await recordDocRefs(d.facts, repo, file, decision.content, 'approved', await d.facts.knownSymbolNames());
     } else {
       await d.vectors.deleteByPath(repo, file);
     }

@@ -8,23 +8,53 @@ const path = require('path');
 
 const num = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 
+/**
+ * Two model tiers behind one client (see pipeline/router.js for who goes where):
+ *   cheap      bounded or low-risk work: GAR rewrites, template/folder routing, drafts for internal-only changes
+ *   expensive  drafts that touch a public interface, and the judge
+ * Embeddings are always the expensive provider's (OpenAI): DeepSeek has no embeddings API.
+ * Without DEEPSEEK_API_KEY the cheap tier falls back to a small model on the primary provider, so a single key still works.
+ */
+function aiConfig(env, host) {
+  const primaryBase = (env.AI_API_BASE_URL || `https://${host}`).replace(/\/$/, '');
+  const primaryKey = env.INTERNAL_AI_API_KEY || env.AI_API_KEY || '';
+  const dsKey = env.DEEPSEEK_API_KEY || '';
+  const num2 = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
+  const expensiveModel = env.AI_EXPENSIVE_MODEL || env.AI_MODEL || 'gpt-5.6-terra';
+  const tiers = {
+    expensive: {
+      name: 'expensive', baseUrl: primaryBase, chatPath: env.AI_API_PATH || '/v1/chat/completions', apiKey: primaryKey, model: expensiveModel,
+      // gpt-5.x rejects temperature 0 ("only the default (1) is supported"), so it is omitted for those models.
+      temperature: /^gpt-5/i.test(expensiveModel) || /^o\d/i.test(expensiveModel) ? null : 0,
+      priceIn: num2(env.AI_EXPENSIVE_PRICE_IN, 2.0), priceOut: num2(env.AI_EXPENSIVE_PRICE_OUT, 12.0), // USD per 1M tokens (estimate)
+    },
+    cheap: dsKey
+      ? { name: 'cheap', baseUrl: (env.AI_CHEAP_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, ''), chatPath: env.AI_CHEAP_PATH || '/chat/completions', apiKey: dsKey, model: env.AI_CHEAP_MODEL || 'deepseek-v4-pro', temperature: 0, priceIn: num2(env.AI_CHEAP_PRICE_IN, 0.66), priceOut: num2(env.AI_CHEAP_PRICE_OUT, 1.98) }
+      : { name: 'cheap', baseUrl: primaryBase, chatPath: env.AI_API_PATH || '/v1/chat/completions', apiKey: primaryKey, model: env.AI_FAST_MODEL || 'gpt-4o-mini', temperature: 0, priceIn: num2(env.AI_CHEAP_PRICE_IN, 0.15), priceOut: num2(env.AI_CHEAP_PRICE_OUT, 0.6) },
+  };
+  return {
+    apiKey: primaryKey,
+    baseUrl: primaryBase,
+    chatPath: tiers.expensive.chatPath,
+    embedPath: env.AI_EMBED_PATH || '/v1/embeddings',
+    model: expensiveModel,
+    fastModel: tiers.cheap.model,
+    embedModel: env.AI_EMBED_MODEL || 'text-embedding-3-small',
+    embedDim: num2(env.AI_EMBED_DIM, 1536),
+    timeoutMs: num2(env.AI_TIMEOUT_MS, 120000),
+    maxRetries: num2(env.AI_MAX_RETRIES, 5),
+    tiers,
+    // Which tier judges drafts: expensive (default, accuracy) | cheap | follow (same tier as the draft)
+    judgeTier: env.ROUTER_JUDGE || 'expensive',
+    // auto | cheap | expensive : force every routed stage to one tier (for tests and cost experiments)
+    routerForce: env.ROUTER_FORCE || 'auto',
+  };
+}
+
 function loadConfig(env = process.env) {
   const host = env.AI_API_HOST || 'api.openai.com';
   return {
-    ai: {
-      apiKey: env.INTERNAL_AI_API_KEY || env.AI_API_KEY || '',
-      // AI_API_BASE_URL wins (e.g. http://ollama:11434); otherwise https://<host>
-      baseUrl: (env.AI_API_BASE_URL || `https://${host}`).replace(/\/$/, ''),
-      chatPath: env.AI_API_PATH || '/v1/chat/completions',
-      embedPath: env.AI_EMBED_PATH || '/v1/embeddings',
-      model: env.AI_MODEL || 'gpt-4o',
-      // A cheaper model for GAR / claim extraction; falls back to the main model.
-      fastModel: env.AI_FAST_MODEL || env.AI_MODEL || 'gpt-4o-mini',
-      embedModel: env.AI_EMBED_MODEL || 'text-embedding-3-small',
-      embedDim: num(env.AI_EMBED_DIM, 1536),
-      timeoutMs: num(env.AI_TIMEOUT_MS, 120000),
-      maxRetries: num(env.AI_MAX_RETRIES, 5),
-    },
+    ai: aiConfig(env, host),
     qdrant: {
       // qdrant | memory (memory: local rehearsal and tests only; nothing persists)
       driver: env.VECTOR_DRIVER || 'qdrant',

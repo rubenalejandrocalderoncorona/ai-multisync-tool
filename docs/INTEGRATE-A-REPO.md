@@ -51,7 +51,7 @@ A PR closed without merging leaves its ticket open with a note; nothing is index
 
 | | |
 |---|---|
-| Central repo (this site) | `rubenalejandrocalderoncorona/portfolio`, local `/Users/racc/Documents/CodeProjects/Portfolios-Demos/portfolio` |
+| Central repo (this site) | `rubenalejandrocalderoncorona/multirepo-agent-docs`, local `/Users/racc/Documents/CodeProjects/Portfolios-Demos/multirepo-agent-docs` |
 | Tool (pipeline code) | `rubenalejandrocalderoncorona/ai-multysinc-tool`, local `/Users/racc/Documents/CodeProjects/Portfolios-Demos/ai-multysinc-tool` |
 | Source repo | `cAImanLabs/cAImanLabsCalendarScheduler`, local `/Users/racc/Documents/CodeProjects/cAImanLabs/cAImanLabs-CalendarScheduler` |
 | Ticketing | `https://tickets.caimanlabs.com.mx` (Vikunja v2.5), MCP at `/api/v2/mcp` |
@@ -61,7 +61,7 @@ A PR closed without merging leaves its ticket open with a note; nothing is index
 
 ## 3. Add the action to the source repo
 
-1. Copy [`examples/calendarscheduler/sync-docs.yml`](../examples/calendarscheduler/sync-docs.yml) to `.github/workflows/sync-docs.yml` in CalendarScheduler. It is set to `CENTRAL_REPO: rubenalejandrocalderoncorona/portfolio`, `TARGET_BRANCH: qa`, `SYNC_MODE: code`.
+1. Copy [`examples/calendarscheduler/sync-docs.yml`](../examples/calendarscheduler/sync-docs.yml) to `.github/workflows/sync-docs.yml` in CalendarScheduler. It is set to `CENTRAL_REPO: rubenalejandrocalderoncorona/multirepo-agent-docs`, `TARGET_BRANCH: qa`, `SYNC_MODE: code`.
 2. Add the secret `DOCS_SYNC_PAT` to that repo. The source is in the `cAImanLabs` organization and the central repo is under your user, and a fine-grained token has a single resource owner. Use a **classic token** with `repo` and `workflow` scopes, or a GitHub App. It dispatches to the central repo, which then reads CalendarScheduler with the same token.
 3. Commit to `main`. The source repo needs no AI key and no other configuration.
 
@@ -69,7 +69,7 @@ A PR closed without merging leaves its ticket open with a note; nothing is index
 
 1. **Branches.** Create `qa` from `main`: `git push origin main:qa`. Protect both so only PRs change them.
 2. **Config.** `config/repos.json` already lists CalendarScheduler (three pages, glossary pinning the product name, and the `docs` globs that load its existing user guide as semantic context). Change it by PR.
-3. **Secrets and variables** on the repo (full list in [SETUP-REQUIRED.md](SETUP-REQUIRED.md)): `DOCS_SYNC_PAT`, `AI_API_KEY`, `FACTSTORE_DATABASE_URL`, `CAIMANDESK_API_TOKEN`; variables `QDRANT_URL=http://qdrant:6333`, `RUNNER_LABEL=multisync`, `CAIMANDESK_PROJECT_ID`.
+3. **Secrets and variables** on the repo (full list in [SETUP-REQUIRED.md](SETUP-REQUIRED.md)): `DOCS_SYNC_PAT`, `AI_API_KEY`, `FACTSTORE_DATABASE_URL`, `CAIMANDESK_API_TOKEN`; variables `QDRANT_URL=http://qdrant.multirepo.svc.cluster.local:6333`, `RUNNER_LABEL=multisync`, `CAIMANDESK_PROJECT_ID=10` (project "Multirepo-Syncs"); optional `DEEPSEEK_API_KEY` (cheap tier).
 4. **The sites.** Apply `deploy/k8s.yaml` once (two Deployments, two Services, one Ingress with the two prefixes) and the tool's runner manifests (`infra/k8s`, which include the RBAC that lets the runner update only `docs-qa` and `docs-prod`). Make the GHCR package public, or create the `ghcr-pull` secret described in `deploy/k8s.yaml`. Then set the variable `DEPLOY_ENABLED=true`.
 5. **Runner.** Deploy `infra/k8s/runner.yaml` (registered to this repo).
 

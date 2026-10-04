@@ -56,3 +56,25 @@ CREATE TABLE IF NOT EXISTS context_state (
   chunks     INTEGER     NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Code -> docs coupling: the public symbols each repo defines, and which documents mention them.
+-- The model router reads this to know whether a change touches something another document depends on.
+CREATE TABLE IF NOT EXISTS symbols (
+  repo       TEXT        NOT NULL,
+  path       TEXT        NOT NULL,
+  kind       TEXT        NOT NULL,   -- export | route | rpc | model | config
+  name       TEXT        NOT NULL,
+  sig_hash   TEXT        NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (repo, path, kind, name)
+);
+CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols (name);
+
+CREATE TABLE IF NOT EXISTS doc_refs (
+  symbol   TEXT NOT NULL,
+  doc_repo TEXT NOT NULL,            -- source repo of the doc, or 'site:<central repo>' for the documentation site itself
+  doc_path TEXT NOT NULL,
+  kind     TEXT NOT NULL,            -- source_doc | site_doc | approved
+  PRIMARY KEY (symbol, doc_repo, doc_path)
+);
+CREATE INDEX IF NOT EXISTS doc_refs_doc_idx ON doc_refs (doc_repo, doc_path);

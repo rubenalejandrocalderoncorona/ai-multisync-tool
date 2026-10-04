@@ -12,6 +12,7 @@
  *   SOURCE_BEFORE   previous commit (default: SOURCE_SHA~1)
  *   SOURCE_DIR      checkout dir (default: source-repo)
  *   FULL_SYNC       1 = (code mode) regenerate every declared page from the whole repo
+ *   FORCE_PAGES     1 = regenerate the declared pages as new WITHOUT reloading the context (FULL_SYNC does both)
  *   ONLY_PAGES      comma list of page paths to regenerate (context is still loaded for every declared page)
  *   RUN_ID          correlation id (default: random)
  *   + AI_*, QDRANT_*, FACTSTORE_DATABASE_URL, see pipeline/config.js
@@ -124,7 +125,7 @@ async function main() {
   if (policy.mode === 'code' || policy.mode === 'both') {
     const prev = G.revExists(sourceDir, before) ? before : ''; // first commit / new branch => document everything in scope
     changes.push(...buildCodeChanges({
-      repo, policy, commit, before: prev, full: process.env.FULL_SYNC === '1',
+      repo, policy, commit, before: prev, full: process.env.FULL_SYNC === '1' || process.env.FORCE_PAGES === '1',
       ...G.accessors(sourceDir),
       readExistingPage: (page) => {
         const f = path.join(targetBase, page);

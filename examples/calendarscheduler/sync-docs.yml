@@ -13,7 +13,7 @@ name: Sync Documentation to Central Repo
 # ============================================================
 
 env:
-  CENTRAL_REPO: 'rubenalejandrocalderoncorona/portfolio'   # <- the central documentation repo
+  CENTRAL_REPO: 'rubenalejandrocalderoncorona/multirepo-agent-docs'   # <- the central documentation repo
   TARGET_BRANCH: 'qa'                               # <- branch the docs PR targets: 'qa' = reviewed in QA, then promoted to main (production)
   SYNC_MODE: 'code'                                 # <- docs | code | both  (must match `mode` in the central config/repos.json)
 

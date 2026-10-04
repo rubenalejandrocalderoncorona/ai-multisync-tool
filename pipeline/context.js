@@ -13,6 +13,8 @@
  * heals itself instead of drifting.
  */
 const { chunkCode, chunkMarkdown, pointId } = require('./chunker');
+const { extractPublicSymbols, docTokens } = require('./symbols');
+const crypto = require('crypto');
 const { selectFiles, scrub, globToRegExp } = require('./codesource');
 
 const matchesAny = (f, globs) => globs.some((g) => globToRegExp(g).test(f));
@@ -22,6 +24,19 @@ const MAX_FILE_BYTES = 200_000;
 const DOC_FILE = /^(README(\.[a-z]+)?\.md|(docs|documentation)\/.*\.(md|mdx))$/i;
 const LANG = { js: 'javascript', mjs: 'javascript', cjs: 'javascript', ts: 'typescript', tsx: 'typescript', jsx: 'javascript', py: 'python', go: 'go', java: 'java', rb: 'ruby', rs: 'rust', yaml: 'yaml', yml: 'yaml', json: 'json', sh: 'shell', sql: 'sql', md: 'markdown' };
 const langOf = (f) => LANG[(f.split('.').pop() || '').toLowerCase()] || 'text';
+
+const sigHash = (sig) => crypto.createHash('sha1').update(sig || '').digest('hex').slice(0, 12);
+// Names too generic to count as a reference when found in prose.
+const MIN_SYMBOL_LEN = 4;
+
+/** Record which known public symbols a document mentions, so a later change to one of them is seen as "documented elsewhere". */
+async function recordDocRefs(facts, docRepo, docPath, text, kind, known) {
+  if (!facts.replaceDocRefs) return 0;
+  const tokens = docTokens(text);
+  const hits = [...known].filter((n) => n.length >= MIN_SYMBOL_LEN && tokens.has(n));
+  await facts.replaceDocRefs(docRepo, docPath, hits, kind);
+  return hits.length;
+}
 
 async function embedAll(llm, texts) {
   const out = [];
@@ -69,13 +84,15 @@ async function syncContext({ repo, commit, before = '', full = false, git, codeS
     await docStore.deleteByRepo(repo, 'brief');
   }
 
+  const symbolRows = [];
   let removed = 0;
+  const goneForSymbols = [];
   if (incremental) {
     const present = new Set(all);
     const gone = [...changed].filter((f) => !present.has(f));
     // Only paths that could have been indexed count (tests, lockfiles and the like never were).
     for (const f of [...selectFiles(gone, { scope, exclude }), ...gone.filter((f) => DOC_FILE.test(f))]) {
-      await codeStore.deleteByPath(repo, f); await docStore.deleteByPath(repo, f); removed++;
+      await codeStore.deleteByPath(repo, f); await docStore.deleteByPath(repo, f); removed++; goneForSymbols.push(f);
     }
   }
 
@@ -87,6 +104,7 @@ async function syncContext({ repo, commit, before = '', full = false, git, codeS
     const raw = git.readAt(commit, f);
     if (raw == null || raw.includes('\u0000') || Buffer.byteLength(raw) > MAX_FILE_BYTES) { skipped.push(f); continue; }
     if (incremental) await codeStore.deleteByPath(repo, f);
+    for (const sy of extractPublicSymbols(f, raw)) symbolRows.push({ path: f, kind: sy.kind, name: sy.name, sig_hash: sigHash(sy.sig) });
     for (const [i, c] of chunkCode(f, scrub(raw)).entries()) {
       if (codePoints.length >= maxChunks) break;
       codePoints.push({ id: pointId(repo, f, i), text: c.text, payload: { repo, path: f, start: c.start, end: c.end, commit, lang: langOf(f), kind: 'code', text: c.text } });
@@ -94,6 +112,9 @@ async function syncContext({ repo, commit, before = '', full = false, git, codeS
   }
   const codeVecs = await embedAll(llm, codePoints.map((p) => p.text));
   await codeStore.upsert(codePoints.map((p, i) => ({ id: p.id, vector: codeVecs[i], payload: p.payload })));
+  if (facts.replaceSymbols) {
+    await facts.replaceSymbols(repo, symbolRows, incremental ? { paths: [...new Set([...toIndex.map((f) => f), ...goneForSymbols])] } : {});
+  }
 
   // Semantic side: the repo's own docs/README and the declared page briefs.
   const docPoints = [];
@@ -111,6 +132,14 @@ async function syncContext({ repo, commit, before = '', full = false, git, codeS
   const docVecs = await embedAll(llm, docPoints.map((p) => p.text));
   await docStore.upsert(docPoints.map((p, i) => ({ id: p.id, vector: docVecs[i], payload: p.payload })));
 
+  let docRefs = 0;
+  if (facts.knownSymbolNames) {
+    const known = await facts.knownSymbolNames();
+    for (const f of docFiles.filter(wanted)) {
+      const raw = git.readAt(commit, f);
+      if (raw != null) docRefs += await recordDocRefs(facts, repo, f, raw, 'source_doc', known);
+    }
+  }
   const totalChunks = await codeStore.count(repo);
   await facts.setContextState(repo, { commit, files: codeFiles.length, chunks: totalChunks });
 
@@ -118,7 +147,7 @@ async function syncContext({ repo, commit, before = '', full = false, git, codeS
     mode: incremental ? 'incremental' : 'full',
     reason: incremental ? `index was at ${before.slice(0, 7)}` : (full ? 'forced' : !before ? 'no previous commit' : !state ? 'first run for this repo' : `index at ${state.commit.slice(0, 7)} but previous commit is ${before.slice(0, 7)}`),
     repoFiles: codeFiles.length, filesIndexed: toIndex.length - skipped.length, filesSkipped: skipped.length, removed,
-    codeChunks: codePoints.length, docChunks: docPoints.length, ms: Date.now() - started,
+    codeChunks: codePoints.length, docChunks: docPoints.length, symbols: symbolRows.length, docRefs, ms: Date.now() - started,
   };
 }
 
@@ -133,9 +162,12 @@ async function syncSite({ siteRepo, commit, files, readFile, docStore, llm, fact
   if (state && state.commit === commit) return { skipped: true, pages: state.files, chunks: state.chunks, reason: `site already indexed at ${commit.slice(0, 7)}` };
   await docStore.deleteByRepo(key);
   const pts = [];
+  const known = facts.knownSymbolNames ? await facts.knownSymbolNames() : new Set();
+  let refs = 0;
   for (const f of files) {
     const raw = readFile(f);
     if (raw == null) continue;
+    refs += await recordDocRefs(facts, key, f, raw, 'site_doc', known);
     for (const [i, c] of chunkMarkdown(raw).entries()) {
       pts.push({ id: pointId(key, f, i), text: `${c.heading}\n${c.text}`, payload: { repo: key, path: f, chunk: i, heading: c.heading, text: c.text, commit, kind: 'site_doc' } });
     }
@@ -143,7 +175,35 @@ async function syncSite({ siteRepo, commit, files, readFile, docStore, llm, fact
   const vecs = await embedAll(llm, pts.map((p) => p.text));
   await docStore.upsert(pts.map((p, i) => ({ id: p.id, vector: vecs[i], payload: p.payload })));
   await facts.setContextState(key, { commit, files: files.length, chunks: pts.length });
-  return { skipped: false, pages: files.length, chunks: pts.length };
+  return { skipped: false, pages: files.length, chunks: pts.length, docRefs: refs };
+}
+
+/**
+ * Fill the FactStore's code -> docs coupling for a repo that is already loaded, WITHOUT embedding anything:
+ * public symbols of every in-scope file, and which documents mention them. Safe to re-run.
+ */
+async function backfillCoupling({ repo, commit, git, facts, scope = ['**'], exclude = [], docs = [], siteFiles = null }) {
+  const all = git.listFiles(commit);
+  const allowed = selectFiles(all, { scope, exclude }).filter((f) => !DOC_FILE.test(f));
+  const rows = [];
+  for (const f of allowed) {
+    const raw = git.readAt(commit, f);
+    if (raw == null || raw.includes('\u0000') || Buffer.byteLength(raw) > MAX_FILE_BYTES) continue;
+    for (const sy of extractPublicSymbols(f, raw)) rows.push({ path: f, kind: sy.kind, name: sy.name, sig_hash: sigHash(sy.sig) });
+  }
+  await facts.replaceSymbols(repo, rows, {});
+  const known = await facts.knownSymbolNames();
+  let refs = 0;
+  let docFiles = 0;
+  for (const f of all.filter((x) => (DOC_FILE.test(x) || matchesAny(x, docs)) && !matchesAny(x, exclude))) {
+    const raw = git.readAt(commit, f);
+    if (raw == null) continue;
+    refs += await recordDocRefs(facts, repo, f, raw, 'source_doc', known);
+    docFiles++;
+  }
+  let siteRefs = 0;
+  if (siteFiles) for (const [path, text] of siteFiles) siteRefs += await recordDocRefs(facts, `site:${siteFiles.repo}`, path, text, 'site_doc', known);
+  return { symbols: rows.length, kinds: [...new Set(rows.map((r) => r.kind))], files: allowed.length, docFiles, docRefs: refs, siteRefs };
 }
 
 /**
@@ -188,4 +248,4 @@ async function retrieveSemantic({ llm, store, repo, queries, topK, siteRepo, sit
   return [...seen.values()].sort((a, b) => b.score - a.score).slice(0, topK + (siteRepo ? siteTopK : 0));
 }
 
-module.exports = { syncContext, syncSite, retrieveCode, retrieveSemantic, DOC_FILE };
+module.exports = { syncContext, syncSite, backfillCoupling, retrieveCode, retrieveSemantic, recordDocRefs, DOC_FILE };

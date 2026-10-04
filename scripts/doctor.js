@@ -40,6 +40,17 @@ async function main() {
     add('LLM', `embeddings ${cfg.ai.embedModel} match AI_EMBED_DIM`, true, e.ok ? 'ok' : `FAIL (${e.why})`, 'AI_EMBED_DIM must equal the model dimension');
   }
   add('LLM', 'AI_MODEL / AI_FAST_MODEL', false, has('AI_MODEL') ? 'set' : `default (${cfg.ai.model})`, 'The judge should be a strong model; the fast model is used for GAR and routing');
+  const t = cfg.ai.tiers;
+  add('LLM', 'expensive tier model', false, t.expensive.model, 'AI_EXPENSIVE_MODEL: used for public-interface and cross-repo changes and as the judge');
+  const dsKey = !!env.DEEPSEEK_API_KEY;
+  add('LLM', 'DEEPSEEK_API_KEY (cheap tier)', false, dsKey ? `set (${t.cheap.model})` : `not set: cheap tier falls back to ${t.cheap.model} on the primary provider`, 'DeepSeek drafts internals-only changes at a fraction of the cost');
+  if (dsKey && !ENV_ONLY) {
+    const r = await probe(async () => {
+      const res = await fetch(`${t.cheap.baseUrl}/models`, { headers: { Authorization: `Bearer ${t.cheap.apiKey}` }, signal: timeout(8000) });
+      return { ok: res.ok, why: `HTTP ${res.status}` };
+    });
+    add('LLM', `${t.cheap.baseUrl} reachable + key accepted`, false, r.ok ? 'ok' : `FAIL (${r.why})`, 'Check DEEPSEEK_API_KEY');
+  }
 
   // ── Qdrant ─────────────────────────────────────────────────────────────────
   if (cfg.qdrant.driver === 'memory') add('Vector DB', 'VECTOR_DRIVER=memory', false, 'memory (nothing persists)', 'Rehearsal only');

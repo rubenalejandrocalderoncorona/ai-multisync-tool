@@ -31,7 +31,7 @@ spec:
         - name: runner
           image: myoung34/github-runner:2.321.0   # pin a digest before relying on it in production
           env:
-            - { name: REPO_URL, value: "https://github.com/rubenalejandrocalderoncorona/portfolio" }
+            - { name: REPO_URL, value: "https://github.com/rubenalejandrocalderoncorona/multirepo-agent-docs" }
             - { name: RUNNER_NAME, value: "multisync-vps" }
             - { name: RUNNER_SCOPE, value: "repo" }
             - { name: LABELS, value: "multisync" }
