@@ -1,5 +1,7 @@
 name: Sync Documentation to Central Repo
 
+# Ready for cAImanLabs/cAImanLabsCalendarScheduler. Save as .github/workflows/sync-docs.yml in that repo.
+
 # ============================================================
 # SOURCE REPO WORKFLOW — copy into each service repository.
 #
@@ -11,9 +13,9 @@ name: Sync Documentation to Central Repo
 # ============================================================
 
 env:
-  CENTRAL_REPO: 'your-org/your-central-docs-repo'   # <- central docs repo (owner/name)
+  CENTRAL_REPO: 'cAImanLabs/cAImanLabs-Documentation'    # <- the production documentation repo
   TARGET_BRANCH: 'main'                             # <- branch in the central repo the docs PR targets ('main' = production branch; PRs only, never direct commits)
-  SYNC_MODE: 'docs'                                 # <- docs | code | both  (must match `mode` in the central config/repos.json)
+  SYNC_MODE: 'code'                                 # <- docs | code | both  (must match `mode` in the central config/repos.json)
 
 on:
   push:

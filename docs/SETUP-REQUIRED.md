@@ -2,6 +2,8 @@
 
 Run `node scripts/doctor.js` at any time. It checks every item below (never printing a secret) and lists what is missing.
 
+See [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md) to connect a repository (worked example: CalendarScheduler into the production docs).
+
 ## 1. Status
 
 | Area | Status | Evidence |
@@ -134,6 +136,8 @@ Every node writes a row to `multisync.node_logs` and a line to the runner log.
 | variable | `QDRANT_URL` | yes | `http://qdrant:6333` |
 | variable | `RUNNER_LABEL` | yes | `multisync` (the in-cluster runner) |
 | variable | `CAIMANDESK_PROJECT_ID` | yes | number in the cAImanDesk project URL |
+| variable | `CAIMANDESK_TRANSPORT`, `CAIMANDESK_MCP_URL` | no | `mcp` plus the in-cluster SSE URL once the MCP server is deployed (see [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md)); default is REST with the token |
+| variable | `REVIEW_ENVIRONMENT_NAME` | no | label shown in review tickets, default `QA` |
 | variable | `AI_API_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL`, `AI_EMBED_MODEL`, `AI_EMBED_DIM` | no | defaults: OpenAI, `gpt-4o`, `gpt-4o-mini`, `text-embedding-3-small`, `1536` (`AI_EMBED_DIM` must match the embedding model) |
 | variable | `TOOL_REPO`, `TOOL_REF` | no | defaults: this repo, `main` |
 

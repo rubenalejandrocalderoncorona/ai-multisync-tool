@@ -108,9 +108,13 @@ A failed run records `reviewer_action = auto_rejected` with a `root_cause_tag` (
 | `trust: review` | **only when the PR is merged** (`sync-docs-approved.yml`), keyed by commit hash |
 | draft, rejected, GAR text | never |
 
+### Review flow and tickets
+
+A passing run opens a pull request (the QA stage). A review ticket in cAImanDesk tracks it: opened with the PR link and judge scores, closed when the PR is merged (that is the approval), noted but left open if the PR is closed unmerged. Failed runs open fallback tickets. See [docs/INTEGRATE-A-REPO.md](docs/INTEGRATE-A-REPO.md) for the full flow and how to connect a repo.
+
 ### Ticketing (cAImanDesk)
 
-`https://tickets.caimanlabs.com.mx` is a Vikunja v2 deployment, so tickets are created through its REST API: `PUT /api/v1/projects/{id}/tasks` with a Bearer API token. Set `CAIMANDESK_API_TOKEN` (an API token allowed to create tasks) and `CAIMANDESK_PROJECT_ID`. A repeat failure for the same repo, file and root cause adds a comment to the open task instead of creating a duplicate. Ticket creation never blocks or fails a run.
+Tickets go through either the cAImanDesk MCP server (`CAIMANDESK_TRANSPORT=mcp`) or the Vikunja REST API (default). The REST path: `https://tickets.caimanlabs.com.mx` is a Vikunja v2 deployment: `PUT /api/v1/projects/{id}/tasks` with a Bearer API token. Set `CAIMANDESK_API_TOKEN` (an API token allowed to create tasks) and `CAIMANDESK_PROJECT_ID`. A repeat failure for the same repo, file and root cause adds a comment to the open task instead of creating a duplicate. Ticket creation never blocks or fails a run.
 
 ## Demo
 

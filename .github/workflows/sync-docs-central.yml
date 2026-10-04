@@ -73,7 +73,7 @@ jobs:
           [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "invalid source repo"; exit 1; }
           [[ "$SOURCE_SHA_IN" =~ ^[A-Za-z0-9_./-]+$ ]]               || { echo "invalid source ref"; exit 1; }
           [[ "$TARGET_BRANCH" =~ ^[A-Za-z0-9_./-]+$ ]]               || { echo "invalid target branch"; exit 1; }
-          case "$TARGET_BRANCH" in main|master) echo "refusing to write directly to $TARGET_BRANCH"; exit 1;; esac
+          # TARGET_BRANCH may be main/master (the PR base). The pipeline then forces trust=review, so nothing is ever committed there directly.
 
       - name: Checkout this docs repo (default branch, for config and the site)
         uses: actions/checkout@v4
@@ -186,6 +186,7 @@ jobs:
           fi
 
       - name: Open review PR (review-trust)
+        id: review
         run: |
           mapfile -t REV < <(jq -r '.results[] | select(.outcome=="pending_review" and .action!="none") | .targetPath' pipeline-results.json)
           [ "${#REV[@]}" -gt 0 ] || { echo "nothing needs review"; exit 0; }
@@ -201,6 +202,31 @@ jobs:
             gh pr edit "$BR" --body-file pr-body.md
           else
             gh pr create --base "$TARGET_BRANCH" --head "$BR" --title "docs: sync from ${SOURCE_REPO} (${SHORT})" --body-file pr-body.md
+          fi
+          gh pr view "$BR" --json url -q .url > pr-url.txt
+          echo "pr_url=$(cat pr-url.txt)" >> "$GITHUB_OUTPUT"
+
+      # The ticket tracks the PR while it waits for review. Approval = merging the PR; the ticket follows.
+      - name: Open review ticket and link it from the PR
+        if: steps.review.outputs.pr_url != ''
+        env:
+          PR_URL: ${{ steps.review.outputs.pr_url }}
+          ENVIRONMENT: ${{ vars.REVIEW_ENVIRONMENT_NAME || 'QA' }}
+          CAIMANDESK_URL: ${{ vars.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx' }}
+          CAIMANDESK_API_TOKEN: ${{ secrets.CAIMANDESK_API_TOKEN }}
+          CAIMANDESK_PROJECT_ID: ${{ vars.CAIMANDESK_PROJECT_ID }}
+          CAIMANDESK_TRANSPORT: ${{ vars.CAIMANDESK_TRANSPORT }}
+          CAIMANDESK_MCP_URL: ${{ vars.CAIMANDESK_MCP_URL }}
+        run: |
+          OUT=$(node .multisync/scripts/review_ticket.js open || true)
+          echo "$OUT"
+          MARKER=$(echo "$OUT" | tail -1 | jq -r '.marker // empty')
+          URL=$(echo "$OUT" | tail -1 | jq -r '.url // empty')
+          if [ -n "$MARKER" ]; then
+            BR=$(git rev-parse --abbrev-ref HEAD)
+            gh pr view "$BR" --json body -q .body | grep -v 'multisync:ticket=' > pr-body-new.md || true
+            printf '\nTicket: %s\n\n%s\n' "$URL" "$MARKER" >> pr-body-new.md
+            gh pr edit "$BR" --body-file pr-body-new.md
           fi
 
       - name: Upload decision log and rejected drafts

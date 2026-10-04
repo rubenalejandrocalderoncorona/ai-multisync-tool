@@ -66,6 +66,10 @@ function loadConfig(env = process.env) {
       deskBaseUrl: (env.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx').replace(/\/$/, ''),
       deskToken: env.CAIMANDESK_API_TOKEN || '',
       deskProjectId: env.CAIMANDESK_PROJECT_ID || '',
+      // rest (Vikunja API token) | mcp (cAImanDesk FastMCP over SSE). Default: rest when a token is set, else mcp when a URL is set.
+      deskTransport: env.CAIMANDESK_TRANSPORT || '',
+      deskMcpUrl: env.CAIMANDESK_MCP_URL || '',
+      deskMcpToken: env.CAIMANDESK_MCP_TOKEN || '',
       slackWebhook: env.SLACK_WEBHOOK_URL || '',
       githubToken: env.GITHUB_TOKEN || env.DOCS_SYNC_PAT || '',
       githubRepo: env.GITHUB_REPOSITORY || '',

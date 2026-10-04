@@ -280,3 +280,47 @@ test('judge: coreRecall is computed from facts flagged core', async () => {
   assert.deepStrictEqual(v.missingCore, ['b']);
   assert.strictEqual(Math.round(v.recall * 100), 33);
 });
+
+// ── GAR proper: hypothetical docs from the fact sheet drive semantic retrieval ──
+test('GAR (code mode): paragraphs are written from the FACT SHEET, after stage 1, and each is a query against the docs index', async () => {
+  const llm = fakeLLM({ judges: [passJudge] });
+  const embedded = [];
+  const origEmbed = llm.embed.bind(llm);
+  llm.embed = async (t) => { embedded.push(...t); return origEmbed(t); };
+  const d = await processChange(unit(), makeDeps({ llm }));
+  const names = d.trail.map((t) => t.node);
+  assert.ok(names.indexOf('code_context') < names.indexOf('gar'), 'GAR runs after the fact sheet exists');
+  const gar = d.trail.find((t) => t.node === 'gar').note;
+  assert.strictEqual(gar.garParagraphs, 2, 'blank paragraphs are dropped');
+  assert.strictEqual(llm.calls.garFacts, 1);
+  assert.ok(embedded.some((e) => e.startsWith('The service listens on a configurable port')), 'paragraph 1 embedded as a retrieval query');
+  assert.ok(embedded.some((e) => e.startsWith('Alerts can be silenced by id')), 'paragraph 2 embedded as a retrieval query');
+  const sc = d.trail.find((t) => t.node === 'semantic_context').note;
+  assert.strictEqual(sc.garQueries, 2);
+  assert.strictEqual(sc.queries, 5);
+});
+
+test('GAR: hypothetical text is never written to either index', async () => {
+  const deps = makeDeps({ policy: { trust: 'auto', serviceName: 'p', styleGuide: '', glossary: {} } });
+  await processChange(unit(), deps);
+  const all = [...deps.vectors.points.values(), ...deps.codeVectors.points.values()].map((p) => p.payload.text).join('\n');
+  assert.ok(!all.includes('configurable port and is configured through environment variables'));
+});
+
+test('GAR: a failure only degrades retrieval, it does not fail the run', async () => {
+  const llm = fakeLLM({ judges: [passJudge] });
+  const orig = llm.chatJson.bind(llm);
+  llm.chatJson = async (m) => { if (m[0].content.includes('HYPOTHETICAL documentation')) throw new Error('boom'); return orig(m); };
+  const d = await processChange(unit(), makeDeps({ llm }));
+  assert.strictEqual(d.outcome, 'pending_review');
+  const gar = d.trail.find((t) => t.node === 'gar').note;
+  assert.strictEqual(gar.garParagraphs, 0);
+  assert.strictEqual(gar.garError, 'boom');
+});
+
+test('GAR: docs mode does not run the fact-sheet GAR (no extra cost)', async () => {
+  const llm = fakeLLM({ judges: [passJudge] });
+  const d = await processChange({ repo: 'o/r', filePath: 'docs/a.md', commit: 'abc', before: '## A\n\nx\n', after: '## A\n\nx\n\n- one\n- two\n- three\n' }, makeDeps({ llm }));
+  assert.ok(!llm.calls.garFacts);
+  assert.strictEqual(d.trail.find((t) => t.node === 'gar').note.garParagraphs, 0);
+});

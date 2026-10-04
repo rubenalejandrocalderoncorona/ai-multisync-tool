@@ -63,3 +63,39 @@ jobs:
             for f in "${REMOVED[@]}"; do GONE+=("/tmp/removed/$f"); done
             node .multisync/scripts/index_approved.js --delete "${GONE[@]}"
           fi
+
+  # Every closed docs-sync PR updates its review ticket: merged = approved (ticket closed),
+  # closed without merging = a note on the ticket, which stays open for a human.
+  ticket:
+    if: startsWith(github.event.pull_request.head.ref, 'docs-sync/')
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout ai-multysinc-tool
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TOOL_REPO || 'rubenalejandrocalderoncorona/ai-multysinc-tool' }}
+          ref: ${{ vars.TOOL_REF || 'main' }}
+          token: ${{ secrets.DOCS_SYNC_PAT }}
+          path: .multisync
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+        working-directory: .multisync
+
+      - name: Update the review ticket
+        env:
+          MERGED: ${{ github.event.pull_request.merged }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          CAIMANDESK_URL: ${{ vars.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx' }}
+          CAIMANDESK_API_TOKEN: ${{ secrets.CAIMANDESK_API_TOKEN }}
+          CAIMANDESK_PROJECT_ID: ${{ vars.CAIMANDESK_PROJECT_ID }}
+          CAIMANDESK_TRANSPORT: ${{ vars.CAIMANDESK_TRANSPORT }}
+          CAIMANDESK_MCP_URL: ${{ vars.CAIMANDESK_MCP_URL }}
+        run: |
+          if [ "$MERGED" = "true" ]; then ACTION=approve; else ACTION=reject; fi
+          node .multisync/scripts/review_ticket.js "$ACTION"

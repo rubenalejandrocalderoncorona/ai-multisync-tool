@@ -16,6 +16,26 @@ async function generateHypothetical(llm, { filePath, before, after, mode = 'docs
   return llm.chat([{ role: 'system', content: P.loadPrompt('gar').text }, { role: 'user', content: user }], { fast: true });
 }
 
+/**
+ * GAR from the fact sheet: several hypothetical documentation paragraphs (one per topic) written AFTER the
+ * code analysis, so they describe what the docs should say about verified facts rather than guess from raw code.
+ * Each paragraph becomes one retrieval query against the documentation index. Never published, never indexed.
+ * A failure here only degrades retrieval, so it returns [] instead of failing the run.
+ */
+async function generateGarFromFacts(llm, { sheet, brief }) {
+  const prompt = P.loadPrompt('gar-facts');
+  try {
+    const r = await llm.chatJson([
+      { role: 'system', content: prompt.text },
+      { role: 'user', content: `FACT_SHEET:\n${JSON.stringify(sheet.facts.map((f) => ({ id: f.id, text: f.text, kind: f.kind, status: f.status })), null, 1)}\n\nPAGE_BRIEF:\n${brief || '(none)'}` },
+    ], { fast: true });
+    const paragraphs = (Array.isArray(r.paragraphs) ? r.paragraphs : []).filter((x) => typeof x === 'string' && x.trim()).slice(0, 4);
+    return { paragraphs, promptId: prompt.id };
+  } catch (e) {
+    return { paragraphs: [], promptId: prompt.id, error: e.message };
+  }
+}
+
 function findTemplateFiles(dir) {
   const out = [];
   if (!fs.existsSync(dir)) return out;
@@ -130,6 +150,7 @@ function withChangeHistory(content, { repo, commit, gaps = [], now = new Date() 
 }
 
 module.exports = {
+  generateGarFromFacts,
   withChangeHistory,
   generateHypothetical, findTemplateFiles, selectTemplate, draftDocument, polishOnly,
   classifyFolder, extractFolderSpec, withFrontmatter, titleFrom,

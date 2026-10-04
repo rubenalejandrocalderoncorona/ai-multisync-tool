@@ -51,6 +51,7 @@ const State = Annotation.Root({
   verdict: Annotation(),
   failure: Annotation({ reducer: last, default: () => null }),
   accepted: Annotation({ reducer: last, default: () => null }),
+  garQueries: Annotation({ reducer: last, default: () => [] }),
   relatedCode: Annotation({ reducer: last, default: () => '' }),
   factSheet: Annotation({ reducer: last, default: () => null }),
   plan: Annotation({ reducer: last, default: () => null }),
@@ -68,13 +69,11 @@ const dedupe = (chunks) => {
   return chunks.filter((c) => (seen.has(c.id) ? false : seen.add(c.id)));
 };
 
-async function retrieve({ vectors, llm, repo, after, hypothetical, topK }) {
-  const [ragVec, garVec] = await llm.embed([after.slice(0, 2000), hypothetical]);
-  const [rag, gar] = await Promise.all([
-    vectors.search(ragVec, { limit: topK, repo }),
-    vectors.search(garVec, { limit: topK, repo }),
-  ]);
-  return dedupe([...gar, ...rag]).slice(0, topK)
+async function retrieve({ vectors, llm, repo, after, hypothetical, garQueries = [], topK }) {
+  const vecs = await llm.embed([after.slice(0, 2000), hypothetical, ...garQueries]);
+  const [ragVec, ...garVecs] = vecs;
+  const [rag, ...gars] = await Promise.all([ragVec, ...garVecs].map((v) => vectors.search(v, { limit: topK, repo })));
+  return dedupe([...gars.flat(), ...rag]).slice(0, topK)
     .map((h) => ({ id: h.id, score: h.score, heading: h.payload.heading, text: h.payload.text }));
 }
 
@@ -222,12 +221,12 @@ async function processChange(change, deps) {
       const topK = s.widened ? t.topKWidened : t.topK;
       const related = await retrieveSemantic({
         llm, store: vectors, repo: change.repo, topK,
-        queries: [s.hypothetical, change.brief, change.existing.slice(0, 1500)],
+        queries: [...s.garQueries, s.hypothetical, change.brief, change.existing.slice(0, 1500)],
       });
       const template = fs.existsSync(s.templatePath) ? fs.readFileSync(s.templatePath, 'utf-8') : '';
       const { plan, promptId } = await planDocs(llm, { sheet: s.factSheet, brief: change.brief, styleText: styleTxt, existing: change.existing, related, template });
       return {
-        note: { related: related.length, kinds: [...new Set(related.map((c) => c.kind))], sections: plan.sections.length, gaps: plan.gaps.length, topK, prompt: promptId },
+        note: { queries: s.garQueries.length + 3, garQueries: s.garQueries.length, related: related.length, kinds: [...new Set(related.map((c) => c.kind))], sections: plan.sections.length, gaps: plan.gaps.length, topK, prompt: promptId },
         update: { plan },
       };
     }),
@@ -235,19 +234,24 @@ async function processChange(change, deps) {
     gar: traced('gar', async (s) => {
       const hypothetical = s.hypothetical
         || await W.generateHypothetical(llm, { filePath: change.filePath, before: change.before, after: change.after, mode, changedFiles });
+      // Code mode: GAR proper. Hypothetical docs are written from the VERIFIED fact sheet (one paragraph per topic)
+      // and each one becomes a query against the documentation index in the semantic stage.
+      const gar = mode === 'code' && s.factSheet?.facts?.length
+        ? await W.generateGarFromFacts(llm, { sheet: s.factSheet, brief: change.brief })
+        : { paragraphs: [] };
       const templatePath = await W.selectTemplate(llm, {
         filePath: change.filePath, content: change.after, templateFiles: deps.templateFiles, defaultTemplate: deps.defaultTemplate,
       });
       const knownFacts = await facts.approvedClaims(change.repo, change.filePath);
       return {
-        note: { template: path.basename(templatePath || ''), knownFacts: knownFacts.length, style: style.key, styleFallback: style.fallback, reusedHypothetical: !!s.hypothetical },
-        update: { hypothetical, templatePath, knownFacts, styleText: styleTxt },
+        note: { template: path.basename(templatePath || ''), knownFacts: knownFacts.length, style: style.key, styleFallback: style.fallback, reusedHypothetical: !!s.hypothetical, garParagraphs: gar.paragraphs.length, ...(gar.error ? { garError: gar.error } : {}) },
+        update: { hypothetical, garQueries: gar.paragraphs, templatePath, knownFacts, styleText: styleTxt },
       };
     }),
 
     write_draft: traced('write_draft', async (s) => {
       const topK = s.widened ? t.topKWidened : t.topK;
-      const context = await retrieve({ vectors, llm, repo: change.repo, after: change.after, hypothetical: s.hypothetical, topK });
+      const context = await retrieve({ vectors, llm, repo: change.repo, after: change.after, hypothetical: s.hypothetical, garQueries: s.garQueries, topK });
       const out = await W.draftDocument(llm, {
         mode, filePath: change.filePath, source: change.after, existing: change.existing, changedFiles,
         relatedCode: s.relatedCode, factSheet: sheetText(s.factSheet), plan: planText(s.plan), templatePath: s.templatePath, context, policy, style, instructions: deps.instructions, feedback: s.feedback,

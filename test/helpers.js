@@ -36,6 +36,7 @@ function fakeLLM({ judges = [], draft = '## Overview\n\nThe service exposes the 
     },
     async chatJson(messages) {
       const sys = messages?.[0]?.content || '';
+      if (sys.includes('HYPOTHETICAL documentation')) { calls.garFacts = (calls.garFacts || 0) + 1; return GAR_FACTS; }
       if (sys.includes('You are a code analyst')) { calls.analyze++; calls.analyzeInputs.push(messages[1].content); return CODE_FACTS; }
       if (sys.includes('You are a documentation planner')) { calls.plan++; calls.planInputs.push(messages[1].content); return PLAN; }
       calls.judge++;
@@ -55,6 +56,7 @@ const CODE_FACTS = {
   ],
   unclear: ['How silences expire'],
 };
+const GAR_FACTS = { paragraphs: ['The service listens on a configurable port and is configured through environment variables.', 'Alerts can be silenced by id through the silence endpoint.', ''] };
 const PLAN = {
   audience: 'Engineers integrating with the alert service', purpose: 'Explain delivery and configuration',
   sections: [{ heading: 'Overview', action: 'update', must_cover: ['F1', 'F2', 'F99'], notes: '' }, { heading: 'Configuration', action: 'add', must_cover: ['F1'], notes: '' }],
@@ -83,4 +85,4 @@ function makeDeps(overrides = {}) {
 const DOC_V1 = '## Overview\n\nAlert API.\n\n- email\n- slack\n';
 const DOC_V2 = '## Overview\n\nAlert API on port 8080.\n\n- email\n- slack\n- pagerduty\n\n## Configuration\n\nSet `ALERT_PORT`.\n';
 
-module.exports = { CODE_FACTS, PLAN, fakeLLM, makeDeps, passJudge, hallucinationJudge, embedText, DOC_V1, DOC_V2 };
+module.exports = { GAR_FACTS, CODE_FACTS, PLAN, fakeLLM, makeDeps, passJudge, hallucinationJudge, embedText, DOC_V1, DOC_V2 };

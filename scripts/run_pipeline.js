@@ -51,6 +51,11 @@ async function main() {
   await d.codeVectors.ensureCollection();
 
   const policy = repoPolicy(d.reposConfig, repo);
+  // Never publish straight to a protected branch: when the target is main/master every change goes through a PR.
+  if (/^(main|master)$/.test(process.env.TARGET_BRANCH || '') && policy.trust === 'auto') {
+    console.log(`target branch ${process.env.TARGET_BRANCH} is protected: trust forced from auto to review`);
+    policy.trust = 'review';
+  }
   const instructions = fs.existsSync(cfg.paths.instructions) ? fs.readFileSync(cfg.paths.instructions, 'utf-8') : '';
   const templateFiles = W.findTemplateFiles(cfg.paths.templates);
   const defaultTemplate = path.join(cfg.paths.templates, 'default-template', 'default-template.md');
