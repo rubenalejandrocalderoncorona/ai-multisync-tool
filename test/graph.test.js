@@ -10,7 +10,7 @@ const nodes = (d) => d.trail.map((t) => t.node);
 
 test('graph trail: happy path visits every stage in order', async () => {
   const d = await processChange(change(), makeDeps());
-  assert.deepStrictEqual(nodes(d), ['prefilter', 'cross_repo', 'similarity', 'gar', 'write_draft', 'judge', 'publish']);
+  assert.deepStrictEqual(nodes(d), ['prefilter', 'cross_repo', 'route', 'similarity', 'gar', 'write_draft', 'verify_draft', 'judge', 'publish']);
   assert.ok(d.trail.every((t) => typeof t.ms === 'number' && t.runId === 'test-run' && t.at));
   assert.strictEqual(d.trail.find((t) => t.node === 'cross_repo').status, 'skip');
   assert.ok('precision' in d.trail.find((t) => t.node === 'judge').note);
@@ -28,6 +28,7 @@ test('graph trail: exhausted judge loop shows widen then fallback', async () => 
   assert.ok(n.includes('widen'));
   assert.strictEqual(n[n.length - 1], 'fallback');
   assert.strictEqual(n.filter((x) => x === 'judge').length, 4); // 2 + widened budget of 2 more
+  assert.strictEqual(n.filter((x) => x === 'verify_draft').length, 4);
   assert.strictEqual(d.trail.at(-1).status, 'fallback');
 });
 
@@ -35,7 +36,7 @@ test('graph trail: polish loop is visible (judge -> polish_draft -> judge)', asy
   const llm = fakeLLM({ judges: [{ ...passJudge, quality: 0.3 }, passJudge] });
   const d = await processChange(change(), makeDeps({ llm }));
   const n = nodes(d);
-  assert.deepStrictEqual(n.slice(4), ['write_draft', 'judge', 'polish_draft', 'judge', 'publish']);
+  assert.deepStrictEqual(n.slice(n.indexOf('write_draft')), ['write_draft', 'verify_draft', 'judge', 'polish_draft', 'judge', 'publish']);
 });
 
 test('logger receives one event per node, including the fallback ticket', async () => {

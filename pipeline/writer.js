@@ -65,7 +65,7 @@ async function selectTemplate(llm, { filePath, content, templateFiles, defaultTe
  * Produce a draft. `feedback` carries the judge's findings on retry.
  * mode 'docs': source is a documentation file. mode 'code': source is a code snapshot and `existing` is the live page.
  */
-async function draftDocument(llm, { mode = 'docs', filePath, source, existing = '', changedFiles = [], relatedCode = '', factSheet = '', plan = '', templatePath, context, policy, style, instructions, feedback }) {
+async function draftDocument(llm, { mode = 'docs', filePath, source, existing = '', changedFiles = [], relatedCode = '', factSheet = '', plan = '', templatePath, context, policy, style, instructions, feedback, tier }) {
   // Code mode follows the style's own outline; a generic business template would demand sections the code cannot support.
   const template = mode === 'code' && style?.outline?.length ? P.outlineText(style) : (fs.existsSync(templatePath) ? fs.readFileSync(templatePath, 'utf-8') : '');
   const ctx = context.map((c) => `[${c.heading}] ${c.text.slice(0, 600)}`).join('\n---\n');
@@ -79,15 +79,15 @@ async function draftDocument(llm, { mode = 'docs', filePath, source, existing = 
   const user = mode === 'code'
     ? `TEMPLATE:\n${template}\n\nCONTEXT:\n${ctx || '(none)'}\n\nEXISTING_PAGE:\n${existing || '(none: write a new page)'}\n\nCHANGED_FILES: ${changedFiles.join(', ')}\n\nFACT_SHEET:\n${factSheet || '(none)'}\n\nPLAN:\n${plan || '(none)'}\n\nCODE:\n${source}\n\nRELATED_CODE:\n${relatedCode || '(none)'}${fix}`
     : `TEMPLATE:\n${template}\n\nCONTEXT:\n${ctx || '(none)'}\n\nSOURCE (${path.basename(filePath)}):\n${source}${fix}`;
-  const out = await llm.chat([{ role: 'system', content: system }, { role: 'user', content: user }]);
+  const out = await llm.chat([{ role: 'system', content: system }, { role: 'user', content: user }], { tier });
   return { text: out.length > 50 ? out : (mode === 'code' ? existing || out : source), promptId: prompt.id };
 }
 
 /** Polish-only rewrite; forbidden from touching facts (failure mode #8). */
-async function polishOnly(llm, { draft, policy, style, instructions }) {
+async function polishOnly(llm, { draft, policy, style, instructions, tier }) {
   const prompt = P.loadPrompt('polish');
   const system = P.fill(prompt.text, { STYLE: [P.styleText(style || { rubric: [] }, policy), instructions].filter(Boolean).join('\n\n') });
-  const out = await llm.chat([{ role: 'system', content: system }, { role: 'user', content: draft }]);
+  const out = await llm.chat([{ role: 'system', content: system }, { role: 'user', content: draft }], { tier });
   return out.length > 50 ? out : draft;
 }
 

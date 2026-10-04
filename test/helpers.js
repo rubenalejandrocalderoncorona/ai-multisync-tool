@@ -18,24 +18,30 @@ function embedText(text, dim = 64) {
  * Scripted LLM. `judges` is a queue of judge results; the last one repeats.
  * Records every call so tests can assert on cost (e.g. "no LLM call was made").
  */
-function fakeLLM({ judges = [], draft = '## Overview\n\nThe service exposes the alert API on port 8080 and supports three alert channels.\n\n## Configuration\n\nSet `ALERT_PORT` to change it.' } = {}) {
-  const calls = { chat: 0, judge: 0, embed: 0, analyze: 0, plan: 0, drafts: [], analyzeInputs: [], planInputs: [] };
+const GOOD_DRAFT = '## Overview\n\nThe alert service exposes an alert API on port 8080 and supports three alert channels. Alert and Silence are the public operations, and the Port setting controls where the service listens.\n\n## Configuration\n\nSet `ALERT_PORT` to change the port. Use Silence with an alert id to mute a single alert.\n';
+
+function fakeLLM({ judges = [], draft = GOOD_DRAFT } = {}) {
+  const calls = { chat: 0, judge: 0, embed: 0, analyze: 0, plan: 0, drafts: [], analyzeInputs: [], planInputs: [], log: [] };
+  const tierOf = (o = {}) => (o.tier === 'cheap' || o.fast ? 'cheap' : 'expensive');
   let j = 0;
   return {
     calls,
     async embed(texts) { calls.embed++; return texts.map((t) => embedText(t)); },
-    async chat(messages) {
+    async chat(messages, opts) {
       calls.chat++;
       const sys = messages[0].content;
+      const kind = sys.includes('ONE short paragraph') ? 'gar' : sys.includes('single best template') ? 'template' : sys.includes('Classify the document') ? 'folder' : sys.includes('improve spelling') ? 'polish' : 'draft';
+      calls.log.push({ kind, tier: tierOf(opts) });
       if (sys.includes('ONE short paragraph')) return 'The service exposes an alert API on port 8080.';
       if (sys.includes('single best template')) return 'DEFAULT';
       if (sys.includes('Classify the document')) return 'features';
       if (sys.includes('improve spelling')) return `${messages[1].content}\n`;
       calls.drafts.push(messages[1].content);
-      return draft;
+      return typeof draft === 'function' ? draft(messages, opts, calls) : draft;
     },
-    async chatJson(messages) {
+    async chatJson(messages, opts) {
       const sys = messages?.[0]?.content || '';
+      calls.log.push({ kind: sys.includes('HYPOTHETICAL documentation') ? 'gar-facts' : sys.includes('code analyst') ? 'analyze' : sys.includes('documentation planner') ? 'plan' : 'judge', tier: tierOf(opts) });
       if (sys.includes('HYPOTHETICAL documentation')) { calls.garFacts = (calls.garFacts || 0) + 1; return GAR_FACTS; }
       if (sys.includes('You are a code analyst')) { calls.analyze++; calls.analyzeInputs.push(messages[1].content); return CODE_FACTS; }
       if (sys.includes('You are a documentation planner')) { calls.plan++; calls.planInputs.push(messages[1].content); return PLAN; }
@@ -85,4 +91,4 @@ function makeDeps(overrides = {}) {
 const DOC_V1 = '## Overview\n\nAlert API.\n\n- email\n- slack\n';
 const DOC_V2 = '## Overview\n\nAlert API on port 8080.\n\n- email\n- slack\n- pagerduty\n\n## Configuration\n\nSet `ALERT_PORT`.\n';
 
-module.exports = { GAR_FACTS, CODE_FACTS, PLAN, fakeLLM, makeDeps, passJudge, hallucinationJudge, embedText, DOC_V1, DOC_V2 };
+module.exports = { GOOD_DRAFT, GAR_FACTS, CODE_FACTS, PLAN, fakeLLM, makeDeps, passJudge, hallucinationJudge, embedText, DOC_V1, DOC_V2 };

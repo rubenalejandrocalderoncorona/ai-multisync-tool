@@ -26,6 +26,9 @@ const { judge, evaluate } = require('./critic');
 const { chunkMarkdown } = require('./chunker');
 const W = require('./writer');
 const { checkCoverage } = require('./coverage');
+const { routeChange } = require('./router');
+const { verifyDraft } = require('./verify');
+const { publicSymbols } = require('./symbols');
 const P = require('./prompts');
 const { retrieveCode, retrieveSemantic } = require('./context');
 const { analyzeCode, planDocs, sheetText, planText } = require('./stages');
@@ -52,6 +55,11 @@ const State = Annotation.Root({
   verdict: Annotation(),
   failure: Annotation({ reducer: last, default: () => null }),
   accepted: Annotation({ reducer: last, default: () => null }),
+  tier: Annotation({ reducer: last, default: () => 'expensive' }),
+  routeInfo: Annotation({ reducer: last, default: () => null }),
+  escalated: Annotation({ reducer: last, default: () => false }),
+  escalatePending: Annotation({ reducer: last, default: () => false }),
+  verifyFailed: Annotation({ reducer: last, default: () => false }),
   garQueries: Annotation({ reducer: last, default: () => [] }),
   ctx: Annotation({ reducer: (a, b) => ({ ...a, ...b }), default: () => ({}) }),
   relatedCode: Annotation({ reducer: last, default: () => '' }),
@@ -99,8 +107,20 @@ async function processChange(change, deps) {
   base.style = style.key;
 
   /** Wrap a node: time it, log it, append to the trail. A node returns { update, note, status }. */
+  const usageDelta = (a, b) => {
+    if (!a || !b) return null;
+    const out = {};
+    for (const t of ['cheap', 'expensive']) {
+      const d = { calls: b[t].calls - a[t].calls, in: b[t].in - a[t].in, out: b[t].out - a[t].out, usd: Number((b[t].usd - a[t].usd).toFixed(5)) };
+      if (d.calls) out[t] = d;
+    }
+    const emb = b.embed.tokens - a.embed.tokens;
+    if (emb) out.embedTokens = emb;
+    return Object.keys(out).length ? out : null;
+  };
   const traced = (name, fn) => async (state) => {
     const started = Date.now();
+    const usage0 = deps.llm.snapshotUsage?.();
     let out;
     try {
       out = await fn(state);
@@ -111,12 +131,23 @@ async function processChange(change, deps) {
       throw err;
     }
     const { update = {}, note = {}, status = 'ok' } = out;
-    const event = { ...base, node: name, status, ms: Date.now() - started, note, at: new Date().toISOString() };
+    const usage = usageDelta(usage0, deps.llm.snapshotUsage?.());
+    const event = { ...base, node: name, status, ms: Date.now() - started, note: usage ? { ...note, usage } : note, at: new Date().toISOString() };
     if (deps.logger) await deps.logger.log(event);
     return { ...update, trail: [event] };
   };
 
-  const finish = (state, d) => ({ ...base, attempts: state.attempts || [], metrics: state.metrics || {}, context: { ...(state.ctx || {}), gar: state.garQueries || [] }, action: 'none', ...d });
+  const costOf = (trail = []) => {
+    const sum = { cheap: { calls: 0, in: 0, out: 0, usd: 0 }, expensive: { calls: 0, in: 0, out: 0, usd: 0 }, embedTokens: 0 };
+    for (const ev of trail) {
+      const u = ev.note?.usage; if (!u) continue;
+      for (const t of ['cheap', 'expensive']) if (u[t]) for (const k of ['calls', 'in', 'out', 'usd']) sum[t][k] += u[t][k];
+      sum.embedTokens += u.embedTokens || 0;
+    }
+    sum.usd = Number((sum.cheap.usd + sum.expensive.usd).toFixed(4));
+    return sum;
+  };
+  const finish = (state, d) => ({ ...base, tier: state.tier, route: state.routeInfo ? { tier: state.routeInfo.tier, reasons: state.routeInfo.reasons } : null, escalated: !!state.escalated, cost: costOf(state.trail), attempts: state.attempts || [], metrics: state.metrics || {}, context: { ...(state.ctx || {}), gar: state.garQueries || [] }, action: 'none', ...d });
   const withMetrics = (s, m) => ({ ...s, metrics: { ...s.metrics, ...m } });
 
   const nodes = {
@@ -161,6 +192,15 @@ async function processChange(change, deps) {
             reason: `feature not available end to end: ${detail}`, draft: null,
           }),
         },
+      };
+    }),
+
+    // Route: which model tier drafts this change. Free: no model call.
+    route: traced('route', async () => {
+      const r = await routeChange({ change, registry, facts, force: cfg.ai.routerForce });
+      return {
+        note: { tier: r.tier, reasons: r.reasons, publicChanged: r.signals.publicChanged.length, publicTotal: r.signals.total, registryHits: r.signals.registry.length, referencedBy: r.signals.referencedBy },
+        update: { tier: r.tier, routeInfo: r, ctx: { route: { tier: r.tier, reasons: r.reasons } } },
       };
     }),
 
@@ -212,7 +252,7 @@ async function processChange(change, deps) {
         queries: [change.after.slice(0, 3000), [change.brief, style.key, change.filePath].filter(Boolean).join('\n')],
       });
       const { sheet, promptId, dropped } = await analyzeCode(llm, {
-        page: change.filePath, styleKey: style.key, changedFiles, repoMap: change.repoMap || [], code: change.after, related,
+        page: change.filePath, styleKey: style.key, changedFiles, repoMap: change.repoMap || [], code: change.after, related, tier: s.tier,
       });
       return {
         note: { basedOnFiles: (change.snapshotFiles || []).length, scopedFiles: (change.repoMap || []).length, snapshotChars: change.after.length, related: related.length, relatedFiles: [...new Set(related.map((c) => c.path))].length, relatedTop: related.slice(0, 6).map((c) => `${c.path}:${c.start}-${c.end} (${c.score.toFixed(2)})`), facts: sheet.facts.length, droppedNoEvidence: dropped, unclear: sheet.unclear.length, topK, widened: s.widened, prompt: promptId },
@@ -228,7 +268,7 @@ async function processChange(change, deps) {
         queries: [...s.garQueries, s.hypothetical, change.brief, change.existing.slice(0, 1500)],
       });
       const template = mode === 'code' ? P.outlineText(style) : (s.templatePath && fs.existsSync(s.templatePath) ? fs.readFileSync(s.templatePath, 'utf-8') : '');
-      const { plan, promptId } = await planDocs(llm, { sheet: s.factSheet, brief: change.brief, styleText: styleTxt, existing: change.existing, related, template });
+      const { plan, promptId } = await planDocs(llm, { sheet: s.factSheet, brief: change.brief, styleText: styleTxt, existing: change.existing, related, template, tier: s.tier });
       return {
         note: { queries: s.garQueries.length + 3, garQueries: s.garQueries.length, related: related.length, kinds: [...new Set(related.map((c) => c.kind))], relatedTop: related.slice(0, 6).map((c) => `${c.kind}:${c.path}${c.heading ? ` > ${c.heading}` : ''} (${c.score.toFixed(2)})`), sections: plan.sections.length, gaps: plan.gaps.length, topK, prompt: promptId },
         update: { plan, ctx: { semantic: related.map((c) => ({ kind: c.kind, path: c.path, heading: c.heading, score: Number(c.score.toFixed(3)) })), plan: plan.sections.map((x) => ({ heading: x.heading, action: x.action, must_cover: x.must_cover })) } },
@@ -258,16 +298,38 @@ async function processChange(change, deps) {
       const context = await retrieve({ vectors, llm, repo: change.repo, after: change.after, hypothetical: s.hypothetical, garQueries: s.garQueries, topK });
       const out = await W.draftDocument(llm, {
         mode, filePath: change.filePath, source: change.after, existing: change.existing, changedFiles,
-        relatedCode: s.relatedCode, factSheet: sheetText(s.factSheet), plan: planText(s.plan), templatePath: s.templatePath, context, policy, style, instructions, feedback: s.feedback,
+        relatedCode: s.relatedCode, factSheet: sheetText(s.factSheet), plan: planText(s.plan), templatePath: s.templatePath, context, policy, style, instructions, feedback: s.feedback, tier: s.tier,
       });
       return {
-        note: { attempt: s.iter + 1, widened: s.widened, topK, contextChunks: context.length, feedbackItems: s.feedback.length, prompt: out.promptId, style: style.key },
-        update: { iter: s.iter + 1, polished: false, draft: out.text },
+        note: { attempt: s.iter + 1, tier: s.tier, escalated: s.escalated, widened: s.widened, topK, contextChunks: context.length, feedbackItems: s.feedback.length, prompt: out.promptId, style: style.key },
+        update: { iter: s.iter + 1, polished: false, draft: out.text, escalatePending: false, verifyFailed: false },
       };
     }),
 
+    // Deterministic gate, no model call. A cheap-tier draft that fails is redone ONCE on the expensive tier (it does not
+    // use up an attempt); any other failure goes back to the writer with the exact reasons.
+    verify_draft: traced('verify_draft', async (s) => {
+      const names = change.before ? (s.routeInfo?.signals?.publicChanged || []) : [...publicSymbols(change.after).values()].map((x) => x.name);
+      const publicChanged = mode === 'code' ? names : [];
+      const v = verifyDraft({
+        draft: s.draft, names: publicChanged, existing: change.existing, filePath: change.filePath,
+        title: change.title || undefined, description: s.plan?.purpose || change.brief || 'Generated documentation.',
+      });
+      const note = { tier: s.tier, ok: v.ok, ...v.metrics, ...(v.ok ? {} : { reasons: v.reasons.slice(0, 4) }) };
+      if (v.ok) return { note, update: { verifyFailed: false } };
+      if (s.tier === 'cheap' && !s.escalated) {
+        return {
+          status: 'escalate', note: { ...note, escalatedTo: 'expensive' },
+          update: { tier: 'expensive', escalated: true, escalatePending: true, feedback: v.reasons, iter: s.iter - 1 }, // the redo is free
+        };
+      }
+      const attempt = { n: s.iter, widened: s.widened, topK: s.widened ? t.topKWidened : t.topK, failure: 'deterministic_check', tier: s.tier };
+      return { status: 'rejected', note, update: { verifyFailed: true, failure: { tag: 'deterministic_check', feedback: v.reasons }, feedback: v.reasons, attempts: [attempt], accepted: null } };
+    }),
+
     judge: traced('judge', async (s) => {
-      const verdict = await judge(llm, { mode, source: change.after, draft: s.draft, knownFacts: s.knownFacts, styleText: s.styleText, existing: change.existing, changedFiles, relatedCode: s.relatedCode, factSheet: sheetText(s.factSheet), plan: planText(s.plan) });
+      const judgeTier = cfg.ai.judgeTier === 'follow' ? s.tier : cfg.ai.judgeTier;
+      const verdict = await judge(llm, { tier: judgeTier, mode, source: change.after, draft: s.draft, knownFacts: s.knownFacts, styleText: s.styleText, existing: change.existing, changedFiles, relatedCode: s.relatedCode, factSheet: sheetText(s.factSheet), plan: planText(s.plan) });
       let failure = evaluate(verdict, t);
       // Deterministic completeness (code mode, styles that opt in): every declared name must be in the page.
       const cov = mode === 'code' ? checkCoverage(s.draft, change.after, style.coverage) : null;
@@ -278,7 +340,7 @@ async function processChange(change, deps) {
       }
       const polishable = failure && GROUNDED_ONLY_TAGS.has(failure.tag) && !s.polished;
       const scores = { precision: verdict.precision, recall: verdict.recall, style: verdict.style, quality: verdict.quality };
-      const note = { ...scores, ...(cov ? { coverage: Object.fromEntries(Object.entries(cov.kinds).map(([k, v]) => [k, `${v.found}/${v.total}`])), coverageMissing: cov.missing.slice(0, 8) } : {}), failure: failure?.tag || null, willPolish: !!polishable, prompt: verdict.promptId, coreRecall: verdict.coreRecall, ...(verdict.missingCore.length ? { missingCore: verdict.missingCore.slice(0, 6) } : {}), ...(verdict.missing.length ? { missing: verdict.missing.slice(0, 6) } : {}), ...(verdict.unsupported.length ? { unsupported: verdict.unsupported.slice(0, 6) } : {}) };
+      const note = { ...scores, ...(cov ? { coverage: Object.fromEntries(Object.entries(cov.kinds).map(([k, v]) => [k, `${v.found}/${v.total}`])), coverageMissing: cov.missing.slice(0, 8) } : {}), failure: failure?.tag || null, willPolish: !!polishable, judgeTier, prompt: verdict.promptId, coreRecall: verdict.coreRecall, ...(verdict.missingCore.length ? { missingCore: verdict.missingCore.slice(0, 6) } : {}), ...(verdict.missing.length ? { missing: verdict.missing.slice(0, 6) } : {}), ...(verdict.unsupported.length ? { unsupported: verdict.unsupported.slice(0, 6) } : {}) };
       if (polishable) return { note, update: { verdict, failure } };
       const attempt = { n: s.iter, widened: s.widened, topK: s.widened ? t.topKWidened : t.topK, ...scores, failure: failure?.tag || null };
       return {
@@ -288,7 +350,7 @@ async function processChange(change, deps) {
     }),
 
     polish_draft: traced('polish_draft', async (s) => {
-      const draft = await W.polishOnly(llm, { draft: s.draft, policy, style, instructions });
+      const draft = await W.polishOnly(llm, { draft: s.draft, policy, style, instructions, tier: s.tier });
       return { note: { reason: s.failure.tag }, update: { draft, polished: true } };
     }),
 
@@ -337,7 +399,8 @@ async function processChange(change, deps) {
   };
 
   const afterPrefilter = (s) => (s.decision ? END : 'cross_repo');
-  const afterCross = (s) => (s.decision ? 'fallback' : 'similarity');
+  const afterCross = (s) => (s.decision ? 'fallback' : 'route');
+  const afterVerify = (s) => (s.escalatePending ? 'write_draft' : s.verifyFailed ? afterJudge(s) : 'judge');
   const afterSimilarity = (s) => (s.decision ? END : mode === 'code' ? 'code_context' : 'gar');
   const afterGar = () => (mode === 'code' ? 'semantic_context' : 'write_draft');
   const afterWiden = () => (mode === 'code' ? 'code_context' : 'write_draft'); // re-read the whole context with a bigger budget
@@ -352,11 +415,13 @@ async function processChange(change, deps) {
   const app = new StateGraph(State)
     .addNode('prefilter', nodes.prefilter)
     .addNode('cross_repo', nodes.cross_repo)
+    .addNode('route', nodes.route)
     .addNode('similarity', nodes.similarity)
     .addNode('code_context', nodes.code_context)
     .addNode('gar', nodes.gar)
     .addNode('semantic_context', nodes.semantic_context)
     .addNode('write_draft', nodes.write_draft)
+    .addNode('verify_draft', nodes.verify_draft)
     .addNode('judge', nodes.judge)
     .addNode('polish_draft', nodes.polish_draft)
     .addNode('widen', nodes.widen)
@@ -364,12 +429,14 @@ async function processChange(change, deps) {
     .addNode('fallback', nodes.fallback)
     .addEdge(START, 'prefilter')
     .addConditionalEdges('prefilter', afterPrefilter, ['cross_repo', END])
-    .addConditionalEdges('cross_repo', afterCross, ['fallback', 'similarity'])
+    .addConditionalEdges('cross_repo', afterCross, ['fallback', 'route'])
+    .addEdge('route', 'similarity')
     .addConditionalEdges('similarity', afterSimilarity, ['code_context', 'gar', END])
     .addEdge('code_context', 'gar')
     .addConditionalEdges('gar', afterGar, ['semantic_context', 'write_draft'])
     .addEdge('semantic_context', 'write_draft')
-    .addEdge('write_draft', 'judge')
+    .addEdge('write_draft', 'verify_draft')
+    .addConditionalEdges('verify_draft', afterVerify, ['judge', 'write_draft', 'polish_draft', 'widen', 'fallback'])
     .addConditionalEdges('judge', afterJudge, ['publish', 'polish_draft', 'write_draft', 'widen', 'fallback'])
     .addEdge('polish_draft', 'judge')
     .addConditionalEdges('widen', afterWiden, ['code_context', 'write_draft'])

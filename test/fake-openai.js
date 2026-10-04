@@ -26,7 +26,7 @@ function startFakeOpenAI(judgeResult = passJudge) {
       else if (sys.includes('ONE short paragraph')) content = 'The project exposes an alert API on port 8081.';
       else if (sys.includes('single best template')) content = 'DEFAULT';
       else if (sys.includes('Classify the document')) content = 'features';
-      else if (sys.includes('markdown body of the page')) content = '## Overview\n\nThe project exposes an alert API on port 8081 and supports email, slack and sms channels.\n\n## Run\n\nRun the binary and set the port.';
+      else if (sys.includes('markdown body of the page')) content = '## Overview\n\nThe project exposes an alert API on port 8081 and supports email, slack and sms channels. Alert and Silence are the public operations of the service.\n\n## Run\n\nRun the binary and set the port. Use Silence with an alert id to mute an alert.\n';
       else content = user;
       res.end(JSON.stringify({ choices: [{ message: { content } }] }));
     });

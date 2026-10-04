@@ -144,7 +144,7 @@ test('END TO END (real Qdrant + Postgres, fake LLM): bootstrap whole context, th
     const r = await run([path.join(__dirname, '../../scripts/run_pipeline.js')], { cwd: work, env: { ...env, SOURCE_SHA: c2, SOURCE_BEFORE: c1 } });
     assert.strictEqual(r.code, 0, r.out);
     assert.match(r.out, /\[sync_context\] ok \d+ms \{"mode":"incremental"/);
-    for (const n of ['prefilter', 'cross_repo', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'judge', 'publish']) assert.match(r.out, new RegExp(`\\[${n}\\]`));
+    for (const n of ['prefilter', 'cross_repo', 'route', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'verify_draft', 'judge', 'publish']) assert.match(r.out, new RegExp(`\\[${n}\\]`));
     const res = JSON.parse(fs.readFileSync(path.join(work, 'pipeline-results.json'), 'utf-8')).results[0];
     assert.strictEqual(res.outcome, 'published');
     assert.ok(fs.existsSync(path.join(work, res.targetPath)));
@@ -153,7 +153,7 @@ test('END TO END (real Qdrant + Postgres, fake LLM): bootstrap whole context, th
 
     // 3. audit trail is in Postgres, in order, and the approved page is now in the semantic index
     const nodes = (await f.pool.query('SELECT node FROM node_logs WHERE run_id=$1 AND repo=$2 ORDER BY id', [runId, repo])).rows.map((x) => x.node);
-    assert.deepStrictEqual(nodes, ['sync_context', 'prefilter', 'cross_repo', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'judge', 'publish']);
+    assert.deepStrictEqual(nodes, ['sync_context', 'prefilter', 'cross_repo', 'route', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'verify_draft', 'judge', 'publish']);
     assert.strictEqual((await f.pool.query('SELECT outcome FROM decisions WHERE run_id=$1 AND repo=$2', [runId, repo])).rows[0].outcome, 'published');
     const approved = await docs.search(Array(64).fill(0.1), { limit: 20, repo, kind: 'approved' });
     assert.ok(approved.length >= 1, 'auto-trust publish indexed the approved page');

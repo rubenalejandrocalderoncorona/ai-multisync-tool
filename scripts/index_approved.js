@@ -12,6 +12,7 @@
  */
 const fs = require('fs');
 const { indexApproved } = require('../pipeline/vectorstore');
+const { recordDocRefs } = require('../pipeline/context');
 const { buildDeps } = require('./lib');
 
 function provenance(content) {
@@ -45,6 +46,7 @@ async function main() {
     }
     const n = await indexApproved({ store: d.vectors, llm: d.llm, content, ...p });
     await d.facts.approveClaims(p.repo, p.filePath, p.commit);
+    if (d.facts.knownSymbolNames) await recordDocRefs(d.facts, p.repo, p.filePath, content, 'approved', await d.facts.knownSymbolNames());
     console.log(`indexed ${f}: ${n} chunk(s) @ ${p.commit.slice(0, 7)}`);
   }
   await d.facts.close();

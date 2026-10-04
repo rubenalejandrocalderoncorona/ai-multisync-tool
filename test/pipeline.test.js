@@ -148,3 +148,14 @@ test('chunker splits on headings and strips front matter', () => {
   const chunks = chunkMarkdown('---\ntitle: x\n---\n## A\n\none\n\n## B\n\ntwo\n');
   assert.deepStrictEqual(chunks.map((c) => c.heading), ['A', 'B']);
 });
+
+test('prefilter: a changed exported signature is NOT skipped as "no structural change"', () => {
+  const { prefilter } = require('../pipeline/prefilter');
+  const before = '### FILE: a.ts\nexport function createPoll(title) {\n  return 1;\n}\n';
+  const p = prefilter({ before, after: before.replace('createPoll(title)', 'createPoll(title, options)'), minDiffLines: 1 });
+  assert.strictEqual(p.proceed, true);
+  assert.strictEqual(p.forced, true);
+  assert.match(p.reason, /public interface changed: createPoll/);
+  // while a pure internal rename still is
+  assert.strictEqual(prefilter({ before, after: before.replace('return 1', 'return 1; // fine'), minDiffLines: 1 }).proceed, false);
+});

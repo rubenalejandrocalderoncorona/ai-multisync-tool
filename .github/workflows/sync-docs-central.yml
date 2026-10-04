@@ -12,6 +12,8 @@ name: Sync Documentation
 # Required secrets: DOCS_SYNC_PAT, AI_API_KEY, FACTSTORE_DATABASE_URL, CAIMANDESK_API_TOKEN (QDRANT_API_KEY only if your Qdrant has auth)
 # Required variables: QDRANT_URL, CAIMANDESK_PROJECT_ID
 # Tool pin: TOOL_REPO (default rubenalejandrocalderoncorona/ai-multysinc-tool), TOOL_REF (default main)
+# Model keys: AI_API_KEY (OpenAI: expensive tier, judge, embeddings) and DEEPSEEK_API_KEY (cheap tier). Without the DeepSeek key the
+# cheap tier falls back to a small OpenAI model. Router tuning: ROUTER_FORCE (auto|cheap|expensive), ROUTER_JUDGE (expensive|cheap|follow).
 # Optional variables: RUNNER_LABEL (e.g. a self-hosted runner on the VPS that can reach
 #   Postgres), AI_API_BASE_URL, AI_MODEL, AI_FAST_MODEL, AI_EMBED_MODEL, AI_EMBED_DIM,
 #   TICKET_PROVIDER, GITHUB_HOST
@@ -147,8 +149,12 @@ jobs:
           INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL || 'https://api.openai.com' }}
           AI_API_PATH: ${{ vars.AI_API_PATH || '/v1/chat/completions' }}
-          AI_MODEL: ${{ vars.AI_MODEL || 'gpt-4o' }}
-          AI_FAST_MODEL: ${{ vars.AI_FAST_MODEL || 'gpt-4o-mini' }}
+          # Model tiers (see pipeline/router.js): expensive = OpenAI, cheap = DeepSeek. Embeddings are always OpenAI.
+          AI_EXPENSIVE_MODEL: ${{ vars.AI_EXPENSIVE_MODEL || 'gpt-5.6-terra' }}
+          AI_CHEAP_MODEL: ${{ vars.AI_CHEAP_MODEL || 'deepseek-v4-pro' }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ROUTER_FORCE: ${{ vars.ROUTER_FORCE || 'auto' }}
+          ROUTER_JUDGE: ${{ vars.ROUTER_JUDGE || 'expensive' }}
           AI_EMBED_MODEL: ${{ vars.AI_EMBED_MODEL || 'text-embedding-3-small' }}
           AI_EMBED_DIM: ${{ vars.AI_EMBED_DIM || '1536' }}
           QDRANT_URL: ${{ vars.QDRANT_URL }}

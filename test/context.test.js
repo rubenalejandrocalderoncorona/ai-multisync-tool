@@ -147,7 +147,7 @@ test('graph (code mode): stage 1 code context then stage 2 semantic context, in 
   const deps = makeDeps({ llm: fakeLLM({ judges: [passJudge] }) });
   await syncContext({ repo: 'o/r', commit: 'c0', before: '', git: repoOf({ c0: { 'src/b.go': 'package main\nfunc Other() { Alert() }\n', 'README.md': '# Proj\n\nAlert service docs.\n' } }), codeStore: deps.codeVectors, docStore: deps.vectors, llm: deps.llm, facts: deps.facts });
   const d = await processChange(unit(), deps);
-  assert.deepStrictEqual(d.trail.map((t) => t.node), ['prefilter', 'cross_repo', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'judge', 'publish']);
+  assert.deepStrictEqual(d.trail.map((t) => t.node), ['prefilter', 'cross_repo', 'route', 'similarity', 'code_context', 'gar', 'semantic_context', 'write_draft', 'verify_draft', 'judge', 'publish']);
   const cc = d.trail.find((t) => t.node === 'code_context').note;
   assert.ok(cc.related >= 1, 'pulled code from OUTSIDE the changed files');
   assert.strictEqual(cc.facts, 2);
@@ -178,7 +178,7 @@ test('graph (code mode): a widened retry re-reads the whole context with a bigge
   const deps = makeDeps({ llm: fakeLLM({ judges: [hallucinationJudge] }), env: { MAX_ITERATIONS: '1' } });
   const d = await processChange(unit(), deps);
   const n = d.trail.map((t) => t.node);
-  assert.deepStrictEqual(n.slice(n.indexOf('widen')), ['widen', 'code_context', 'gar', 'semantic_context', 'write_draft', 'judge', 'fallback']);
+  assert.deepStrictEqual(n.slice(n.indexOf('widen')), ['widen', 'code_context', 'gar', 'semantic_context', 'write_draft', 'verify_draft', 'judge', 'fallback']);
   const ccs = d.trail.filter((t) => t.node === 'code_context');
   assert.strictEqual(ccs[0].note.topK, 12);
   assert.strictEqual(ccs[1].note.topK, 30);
@@ -244,7 +244,7 @@ test('withFrontmatter: an explicit title and description override the guessed on
 });
 
 test('graph (code mode): page keeps its declared path, gets a real title and a generated change history', async () => {
-  const deps = makeDeps({ policy: { trust: 'review', serviceName: 'proj', styleGuide: '', glossary: {} }, llm: fakeLLM({ judges: [passJudge], draft: '## Description\n\nA service that does things well enough to pass.\n\n## Change History\n\n| 2023-10-10 | x |\n' }) });
+  const deps = makeDeps({ policy: { trust: 'review', serviceName: 'proj', styleGuide: '', glossary: {} }, llm: fakeLLM({ judges: [passJudge], draft: '## Description\n\nA service that exposes A, B and C as its public operations, and does things well enough for a reader to use it without opening the code.\n\n## Usage\n\nCall A, B or C with the documented arguments.\n\n## Change History\n\n| 2023-10-10 | x |\n' }) });
   const d = await processChange({ kind: 'code', repo: 'o/r', filePath: 'overview.md', commit: 'abc1234', before: null, after: '### FILE: a.go\nfunc A() {}\nfunc B() {}\nfunc C() {}\n', existing: '', changedFiles: ['a.go'], brief: 'b' }, deps);
   assert.strictEqual(d.subfolder, null, 'no re-filing of a declared page');
   assert.match(d.targetPath, /services\/proj\/overview\.md$/);
@@ -474,22 +474,33 @@ test('coverage: whole-word matching (a name inside another word does not count),
   assert.deepStrictEqual(checkCoverage('API_KEY', 'const a = process.env.API_KEY; const b = process.env.DATABASE_URL;', { kinds: ['env_var'], min: 0.5 }).missing, ['env_var:DATABASE_URL']);
 });
 
-test('graph: a schema page that omits declared models fails with incomplete_coverage and the exact names are fed back', async () => {
-  const code = `### FILE: schema.prisma\n${PRISMA}`;
-  const llm = fakeLLM({ judges: [passJudge], draft: '## Overview\n\nThe database has a User entity and a Poll entity with many fields documented here in detail.\n\n## Entities\n\n### User\n\n### Poll\n\n## Enumerations\n\n### PollStatus\n' });
-  const d = await processChange(unit({ after: code, before: null, styleKey: 'Data and schema reference', changedFiles: ['schema.prisma'] }), makeDeps({ llm, env: { MAX_ITERATIONS: '2' } }));
+const MANY = Array.from({ length: 10 }, (_, i) => `M${i + 1}`);
+const MODELS = `### FILE: schema.prisma\n${MANY.map((m) => `model ${m} {\n  id String\n}`).join('\n')}\n`;
+const schemaDraft = (names) => `## Overview\n\nThe database layer stores every entity of the application in one relational schema and this page documents them.\n\n## Entities\n\n${names.map((n) => `### ${n}\n\nThe ${n} entity.\n`).join('\n')}`;
+
+test('graph: a schema page that names most but not all declared models passes the verifier (60%) and is caught by the coverage check (90%), with the exact names fed back', async () => {
+  const llm = fakeLLM({ judges: [passJudge], draft: schemaDraft(MANY.slice(0, 7)) });
+  const d = await processChange(unit({ after: MODELS, before: null, styleKey: 'Data and schema reference', changedFiles: ['schema.prisma'] }), makeDeps({ llm, env: { MAX_ITERATIONS: '2' } }));
   assert.strictEqual(d.outcome, 'fallback');
   const j = d.trail.filter((t) => t.node === 'judge');
   assert.strictEqual(j[0].note.failure, 'incomplete_coverage');
-  assert.deepStrictEqual(j[0].note.coverage.prisma_model, '2/3');
-  assert.deepStrictEqual(j[0].note.coverageMissing, ['prisma_model:Vote']);
-  assert.match(llm.calls.drafts[1], /Add every one of: Vote/, 'the next attempt is told exactly what is missing');
+  assert.strictEqual(j[0].note.coverage.prisma_model, '7/10');
+  assert.deepStrictEqual(j[0].note.coverageMissing, ['prisma_model:M8', 'prisma_model:M9', 'prisma_model:M10']);
+  assert.match(llm.calls.drafts[1], /Add every one of: M8, M9, M10/, 'the next attempt is told exactly what is missing');
 });
 
-test('graph: when the page names every declared model, coverage passes and the page publishes', async () => {
-  const code = `### FILE: schema.prisma\n${PRISMA}`;
-  const llm = fakeLLM({ judges: [passJudge], draft: '## Overview\n\nThe database layer in this project stores users and polls.\n\n## Entities\n\n### User\n\n### Poll\n\n### Vote\n\n## Enumerations\n\n### PollStatus\n' });
-  const d = await processChange(unit({ after: code, before: null, styleKey: 'Data and schema reference', changedFiles: ['schema.prisma'] }), makeDeps({ llm }));
+test('graph: a draft that names too few symbols never reaches the judge; the deterministic gate sends the missing names back', async () => {
+  const llm = fakeLLM({ judges: [passJudge], draft: schemaDraft(MANY.slice(0, 3)) });
+  const d = await processChange(unit({ after: MODELS, before: null, styleKey: 'Data and schema reference', changedFiles: ['schema.prisma'] }), makeDeps({ llm, env: { MAX_ITERATIONS: '2' } }));
+  assert.strictEqual(llm.calls.judge, 0, 'no judge call was spent on an obviously incomplete draft');
+  const v = d.trail.find((t) => t.node === 'verify_draft');
+  assert.strictEqual(v.note.ok, false);
+  assert.match(v.note.reasons[0], /Name each of them: M10, M4, M5/);
+});
+
+test('graph: when the page names every declared model, verification and coverage pass and the page publishes', async () => {
+  const llm = fakeLLM({ judges: [passJudge], draft: schemaDraft(MANY) });
+  const d = await processChange(unit({ after: MODELS, before: null, styleKey: 'Data and schema reference', changedFiles: ['schema.prisma'] }), makeDeps({ llm }));
   assert.strictEqual(d.outcome, 'pending_review');
-  assert.strictEqual(d.trail.find((t) => t.node === 'judge').note.coverage.prisma_model, '3/3');
+  assert.strictEqual(d.trail.find((t) => t.node === 'judge').note.coverage.prisma_model, '10/10');
 });

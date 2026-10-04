@@ -5,21 +5,21 @@ const P = require('./prompts');
 const str = (v) => (typeof v === 'string' ? v : '');
 
 /** Retry once on malformed JSON: a stage must not silently continue with nothing. */
-async function jsonStage(llm, messages) {
-  try { return await llm.chatJson(messages); } catch (first) {
-    try { return await llm.chatJson([...messages, { role: 'user', content: 'Your previous reply was not valid JSON. Reply again with ONLY the JSON object.' }]); }
+async function jsonStage(llm, messages, opts) {
+  try { return await llm.chatJson(messages, opts); } catch (first) {
+    try { return await llm.chatJson([...messages, { role: 'user', content: 'Your previous reply was not valid JSON. Reply again with ONLY the JSON object.' }], opts); }
     catch { throw new Error(`stage returned invalid JSON twice: ${first.message}`); }
   }
 }
 
 /** STAGE 1: code context -> fact sheet. */
-async function analyzeCode(llm, { page, styleKey, changedFiles, repoMap, code, related }) {
+async function analyzeCode(llm, { page, styleKey, changedFiles, repoMap, code, related, tier }) {
   const prompt = P.loadPrompt('analyze-code');
   const relatedText = related.map((c) => c.text).join('\n\n') || '(none retrieved)';
   const r = await jsonStage(llm, [
     { role: 'system', content: prompt.text },
     { role: 'user', content: `PAGE: ${page} (style: ${styleKey || 'unspecified'})\n\nCHANGED_FILES: ${changedFiles.join(', ') || '(none)'}\n\nREPO_MAP:\n${repoMap.join('\n') || '(unknown)'}\n\nCODE:\n${code}\n\nRELATED_CODE:\n${relatedText}` },
-  ]);
+  ], { tier });
   const facts = (Array.isArray(r.facts) ? r.facts : [])
     .filter((f) => f && str(f.text) && str(f.evidence))   // a fact without evidence is not allowed
     .map((f, i) => ({ id: str(f.id) || `F${i + 1}`, text: f.text, evidence: f.evidence, kind: str(f.kind) || 'other', status: str(f.status) || 'unchanged' }));
@@ -27,13 +27,13 @@ async function analyzeCode(llm, { page, styleKey, changedFiles, repoMap, code, r
 }
 
 /** STAGE 2: semantic context -> documentation plan. */
-async function planDocs(llm, { sheet, brief, styleText, existing, related, template }) {
+async function planDocs(llm, { sheet, brief, styleText, existing, related, template, tier }) {
   const prompt = P.loadPrompt('plan-docs');
   const relatedDocs = related.map((c) => `[${c.kind}] ${c.heading || c.path}: ${c.text.slice(0, 700)}`).join('\n---\n') || '(none retrieved)';
   const r = await jsonStage(llm, [
     { role: 'system', content: prompt.text },
     { role: 'user', content: `FACT_SHEET:\n${JSON.stringify(sheet, null, 1)}\n\nPAGE_BRIEF:\n${brief || '(none)'}\n\nSTYLE:\n${styleText || '(none)'}\n\nEXISTING_PAGE:\n${existing || '(none)'}\n\nRELATED_DOCS:\n${relatedDocs}\n\nTEMPLATE:\n${template || '(none)'}` },
-  ]);
+  ], { tier });
   const ids = new Set(sheet.facts.map((f) => f.id));
   const sections = (Array.isArray(r.sections) ? r.sections : []).map((s) => ({
     heading: str(s.heading), action: str(s.action) || 'add', notes: str(s.notes),

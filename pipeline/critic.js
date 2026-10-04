@@ -14,12 +14,12 @@ const P = require('./prompts');
  * @param {object} a
  * @param {'docs'|'code'} [a.mode]  docs: source is a doc file. code: source is a code snapshot.
  */
-async function judge(llm, { mode = 'docs', source, draft, knownFacts = [], styleText = '', existing = '', changedFiles = [], relatedCode = '', factSheet = '', plan = '' }) {
+async function judge(llm, { mode = 'docs', source, draft, knownFacts = [], styleText = '', existing = '', changedFiles = [], relatedCode = '', factSheet = '', plan = '', tier }) {
   const prompt = P.loadPrompt(mode === 'code' ? 'judge-code' : 'judge-docs');
   const user = mode === 'code'
     ? `CODE:\n${source}\n\nCHANGED_FILES: ${changedFiles.join(', ') || '(unknown)'}\n\nEXISTING_PAGE:\n${existing || '(none)'}\n\nRELATED_CODE:\n${relatedCode || '(none)'}\n\nFACT_SHEET:\n${factSheet || '(none)'}\n\nPLAN:\n${plan || '(none)'}\n\nDRAFT:\n${draft}\n\nKNOWN_FACTS:\n${knownFacts.join('\n') || '(none)'}\n\nSTYLE:\n${styleText || '(none)'}`
     : `SOURCE:\n${source}\n\nDRAFT:\n${draft}\n\nKNOWN_FACTS:\n${knownFacts.join('\n') || '(none)'}\n\nSTYLE:\n${styleText || '(none)'}`;
-  const r = await llm.chatJson([{ role: 'system', content: prompt.text }, { role: 'user', content: user }]);
+  const r = await llm.chatJson([{ role: 'system', content: prompt.text }, { role: 'user', content: user }], { tier });
   const claims = Array.isArray(r.claims) ? r.claims : [];
   const facts = Array.isArray(r.facts) ? r.facts : [];
   const supported = claims.filter((c) => c.supported).length;
