@@ -16,20 +16,33 @@ python -m multisync.cli.runs <run_id> --json
 ```
 Run it where Postgres is reachable (an ssh tunnel to `postgres-0`, with `FACTSTORE_DATABASE_URL` pointing at it).
 
-## 2. LangSmith: hosted LangGraph traces (opt-in)
+## 2. Arize Phoenix: self-hosted traces (the LangGraph run as a tree)
 
-LangGraph is instrumented for LangSmith. With tracing on, every run shows as a tree in a web UI: each node, each model call with its exact
-prompt and answer, latency and tokens per call, and a search by repo, page or commit (runs carry the metadata `repo`, `page`, `commit`,
-`run_id`, `mode`, `style` and the tags `docs-sync`, the repo name and `mode:<code|docs>`).
+Phoenix is open source and runs in the cluster (`infra/k8s/phoenix.yaml`, one container, stored in the existing Postgres under the schema
+`phoenix`, about 0.5 GB of RAM). It is served at **https://rubenalejandrocalderoncorona.org/phoenix** behind its own login. Nothing leaves your
+server. (Self-hosted LangSmith was ruled out: it needs an Enterprise license and 16 GB of RAM.)
 
-It is off by default because **it sends prompts, code excerpts and model output to a third party** (LangSmith cloud, or your own
-self-hosted LangSmith). To enable it:
+Each run is one trace, grouped into sessions by run id, in the project `multirepo-agent-docs`:
 
-1. Create a LangSmith account and an API key.
-2. `kubectl -n multirepo patch secret multisync-secrets --type merge -p '{"stringData":{"LANGSMITH_API_KEY":"<key>"}}'`
-3. Set `LANGSMITH_TRACING: "true"` in the `multisync-config` ConfigMap (`infra/k8s/webhook.yaml`) and apply it. New Jobs pick it up.
+```
+docs-sync <repo> <page>                 the run: outcome, tier, cost
+  node:prefilter, node:route, node:similarity, node:code_context, node:gar, node:write_draft, node:verify_draft, node:judge, ...
+    llm:cheap deepseek-v4-pro           every model call: the exact messages, the answer, tokens, cost
+    llm:expensive gpt-5.6-terra
+    embeddings                          tokens per call
+```
+A failing node shows as an error span. Each node span carries that node's decision data (scores, tier, retrieved context, repo facts check).
+The graph is traced with OpenTelemetry and the OpenInference span conventions (`multisync/tracing.py`); it is off unless
+`PHOENIX_COLLECTOR_ENDPOINT` is set, and tracing can never fail a run.
 
-No code change is needed: the Jobs read these variables through the same `envFrom` that carries the other settings.
+**Access.** Log in as `admin@localhost` with the initial password in the cluster
+(`kubectl -n multirepo get secret phoenix-secrets -o jsonpath='{.data.PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD}' | base64 -d`);
+Phoenix asks for a new one at the first login. The Jobs send traces with a system key (`PHOENIX_API_KEY` in `multisync-secrets`); a new key
+is made under Settings, System keys.
+
+**Setup from scratch.** Create `phoenix-secrets` (the header of `phoenix.yaml` has the command), `CREATE SCHEMA phoenix` in the FactStore
+database, apply `phoenix.yaml`, log in, create a system key, put it in `multisync-secrets` as `PHOENIX_API_KEY`. The traces contain prompts and
+code excerpts, so keep the login strong.
 
 ## 3. Raw logs
 

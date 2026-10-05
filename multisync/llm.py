@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 import httpx
 
+from . import tracing
+
 RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
@@ -108,16 +110,21 @@ class LLM:
         temp = ep.get("temperature") if temperature is ... else temperature
         if temp is not None:  # some models reject any explicit value
             body["temperature"] = temp
-        data = self._post(ep["chatPath"], body, ep)
-        u = data.get("usage") or {}
-        pin, pout = u.get("prompt_tokens") or 0, u.get("completion_tokens") or 0
-        slot = self.usage[t]
-        slot["calls"] += 1
-        slot["in"] += pin
-        slot["out"] += pout
-        slot["usd"] += (pin * (ep.get("priceIn") or 0) + pout * (ep.get("priceOut") or 0)) / 1e6
-        choices = data.get("choices") or [{}]
-        return ((choices[0].get("message") or {}).get("content") or "").strip()
+        with tracing.span(f"llm:{t} {ep['model']}", "LLM", **tracing.llm_attrs(messages, ep["model"], t, temp)) as sp:
+            data = self._post(ep["chatPath"], body, ep)
+            u = data.get("usage") or {}
+            pin, pout = u.get("prompt_tokens") or 0, u.get("completion_tokens") or 0
+            usd = (pin * (ep.get("priceIn") or 0) + pout * (ep.get("priceOut") or 0)) / 1e6
+            slot = self.usage[t]
+            slot["calls"] += 1
+            slot["in"] += pin
+            slot["out"] += pout
+            slot["usd"] += usd
+            choices = data.get("choices") or [{}]
+            text = ((choices[0].get("message") or {}).get("content") or "").strip()
+            sp.set(**{"output.value": text[:12000], "llm.output_messages.0.message.role": "assistant", "llm.output_messages.0.message.content": text[:8000],
+                      "llm.token_count.prompt": pin, "llm.token_count.completion": pout, "llm.token_count.total": pin + pout, "multisync.cost_usd": round(usd, 6)})
+            return text
 
     def chat_json(self, messages: list[dict], **opts) -> Any:
         return parse_json(self.chat(messages, **opts))
@@ -126,9 +133,12 @@ class LLM:
         """One vector per input, in order. Always the primary (OpenAI) endpoint."""
         if not texts:
             return []
-        data = self._post(self.cfg["embedPath"], {"model": self.cfg["embedModel"], "input": texts}, {**self.cfg, "model": None})
-        self.usage["embed"]["calls"] += 1
-        self.usage["embed"]["tokens"] += (data.get("usage") or {}).get("total_tokens") or 0
+        with tracing.span("embeddings", "EMBEDDING", **{"embedding.model_name": self.cfg["embedModel"], "multisync.inputs": len(texts)}) as sp:
+            data = self._post(self.cfg["embedPath"], {"model": self.cfg["embedModel"], "input": texts}, {**self.cfg, "model": None})
+            self.usage["embed"]["calls"] += 1
+            tokens = (data.get("usage") or {}).get("total_tokens") or 0
+            self.usage["embed"]["tokens"] += tokens
+            sp.set(**{"llm.token_count.total": tokens})
         return [d["embedding"] for d in sorted(data["data"], key=lambda d: d["index"])]
 
     def close(self) -> None:

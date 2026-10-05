@@ -87,10 +87,10 @@ data:
   ROUTER_FORCE: "auto"
   ROUTER_JUDGE: "expensive"
   REVIEW_ENVIRONMENT_NAME: "QA"
-  # Hosted LangGraph traces (LangSmith). Off by default: turning it on sends prompts, code excerpts and model output to a third party.
-  # To enable: set LANGSMITH_TRACING to "true" and add LANGSMITH_API_KEY to the multisync-secrets Secret (docs/OBSERVABILITY.md).
-  LANGSMITH_TRACING: "false"
-  LANGSMITH_PROJECT: "multirepo-agent-docs"
+  # Traces go to the self-hosted Phoenix in this namespace (infra/k8s/phoenix.yaml). The Jobs authenticate with PHOENIX_API_KEY from
+  # multisync-secrets; without that key they still run, tracing just fails quietly.
+  PHOENIX_COLLECTOR_ENDPOINT: "http://phoenix.multirepo.svc.cluster.local:6006/phoenix"
+  PHOENIX_PROJECT_NAME: "multirepo-agent-docs"
 ---
 apiVersion: apps/v1
 kind: Deployment

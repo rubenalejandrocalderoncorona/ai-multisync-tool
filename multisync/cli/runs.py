@@ -6,7 +6,7 @@
   python -m multisync.cli.runs <run_id> --json      the same as JSON
 
 Every node of the LangGraph graph writes one row (node_logs) as it finishes, so a run that fails halfway is still visible here.
-For hosted traces of the same graph (prompts, model calls, latency per call) enable LangSmith, see docs/OBSERVABILITY.md.
+For the same runs as trace trees (every prompt and answer) open Phoenix at /phoenix, see docs/OBSERVABILITY.md.
 """
 from __future__ import annotations
 
