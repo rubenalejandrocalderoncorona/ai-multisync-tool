@@ -68,7 +68,7 @@ services:
     profiles: ["tools"]
     build:
       context: ..
-      dockerfile: Dockerfile.pipeline
+      dockerfile: Dockerfile
     environment:
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY}
@@ -77,7 +77,7 @@ services:
       INTERNAL_AI_API_KEY: ${INTERNAL_AI_API_KEY:-}
       AI_EMBED_MODEL: ${AI_EMBED_MODEL:-text-embedding-3-small}
       AI_EMBED_DIM: ${AI_EMBED_DIM:-1536}
-    command: ["node", "scripts/healthcheck.js"]
+    command: ["python", "-m", "multisync.cli.healthcheck"]
     depends_on:
       qdrant: { condition: service_healthy }
       postgres: { condition: service_healthy }

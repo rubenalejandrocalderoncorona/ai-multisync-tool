@@ -10,7 +10,7 @@ Every run decides, **before any model call**, which model drafts the page. Nothi
 | Verification | deterministic check, no model |
 | Judge | expensive by default (`ROUTER_JUDGE=expensive|cheap|follow`) |
 
-## How a draft is routed (`pipeline/router.js`)
+## How a draft is routed (`multisync/router.py`)
 
 Expensive when any of these is true, otherwise cheap:
 - a public interface changed (exports, routes, tRPC procedures, schema models/enums, env/config variables; compared by signature hash);
@@ -20,7 +20,7 @@ Expensive when any of these is true, otherwise cheap:
 
 `ROUTER_FORCE=cheap|expensive` overrides it. The reasons are stored in the decision (`tier`, `route`, `escalated`, `cost`).
 
-## Verification cascade (`pipeline/verify.js`)
+## Verification cascade (`multisync/verify.py`)
 
 A cheap draft must mention at least 60% of the changed public symbols (up to 40 checked), keep composable front matter, have a sane
 length against the existing page, and keep its headings. A failure escalates **once** to the expensive model for that draft; it does
@@ -43,8 +43,8 @@ Live check on CalendarScheduler `overview.md`: cheap draft about $0.03, terra ju
 and `doc_refs` (which docs mention which symbol). They are filled on every context sync, site sync and approval. To backfill or inspect:
 
 ```bash
-node scripts/factstore.js --migrate
-node scripts/factstore.js --backfill --repo owner/name --dir /path/to/checkout [--site-dir DIR --site-repo owner/central]
-node scripts/factstore.js --status
-node scripts/factstore.js --symbol DATABASE_URL
+python -m multisync.cli.factstore --migrate
+python -m multisync.cli.factstore --backfill --repo owner/name --dir /path/to/checkout [--site-dir DIR --site-repo owner/central]
+python -m multisync.cli.factstore --status
+python -m multisync.cli.factstore --symbol DATABASE_URL
 ```

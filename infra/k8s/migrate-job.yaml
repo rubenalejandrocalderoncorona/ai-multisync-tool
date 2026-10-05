@@ -14,7 +14,7 @@ spec:
       containers:
         - name: migrate
           image: __PIPELINE_IMAGE__
-          command: ["node", "scripts/healthcheck.js"]
+          command: ["python", "-m", "multisync.cli.healthcheck"]
           env:
             - { name: QDRANT_URL, value: "http://qdrant:6333" }   # no API key: Qdrant is cluster-internal only
             - { name: QDRANT_COLLECTION, value: "docs_chunks" }

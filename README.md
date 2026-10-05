@@ -16,10 +16,10 @@ Cheap checks run first; each layer stops the run before the next, more expensive
 
 | # | Layer | Cost | Stops the run when |
 |---|---|---|---|
-| 1 | **Prefilter** (`pipeline/prefilter.js`) | none | diff is below `MIN_DIFF_LINES` (`trivial_diff`), or nothing structural or fact-bearing changed (`no_structural_change`) |
-| 2 | **Cross-repo gate** (`pipeline/registry.js`) | FactStore lookup | a registered contract point is not documented by the repos that must also ship it (`cross_repo_incomplete`) |
-| 3 | **Similarity** (`pipeline/pipeline.js`) | embeddings | shape is unchanged and every chunk is ≥ `SIMILARITY_HIGH` similar to approved text → only the commit hash is re-keyed (anti-staleness) |
-| 4 | **Generate + judge loop** (`writer.js`, `critic.js`) | LLM | passes, or falls back (below) |
+| 1 | **Prefilter** (`multisync/prefilter.py`) | none | diff is below `MIN_DIFF_LINES` (`trivial_diff`), or nothing structural or fact-bearing changed (`no_structural_change`) |
+| 2 | **Cross-repo gate** (`multisync/registry.py`) | FactStore lookup | a registered contract point is not documented by the repos that must also ship it (`cross_repo_incomplete`) |
+| 3 | **Similarity** (`multisync/pipeline.py`) | embeddings | shape is unchanged and every chunk is ≥ `SIMILARITY_HIGH` similar to approved text → only the commit hash is re-keyed (anti-staleness) |
+| 4 | **Generate + judge loop** (`writer.py`, `critic.py`) | LLM | passes, or falls back (below) |
 | 5 | **Publish by trust level** | none | `auto` → committed and indexed; `review` → pull request for a technical writer |
 
 A *shape* change (heading, code block, table row, list item, function or array element added or removed) overrides high similarity, because adding one item barely moves an embedding.
@@ -48,9 +48,9 @@ The writer follows the plan; the judge checks every claim against the code (incl
 ### Seeing and checking the context
 
 ```bash
-node scripts/context_search.js --status                                            # what is loaded, per repo and kind
-node scripts/context_search.js --repo owner/name --query "how are polls created"   # what a code/semantic query retrieves
-node scripts/context_search.js --repo owner/name --gar "Participants pick the times that work for them."   # GAR-style query
+python -m multisync.cli.context_search --status                                            # what is loaded, per repo and kind
+python -m multisync.cli.context_search --repo owner/name --query "how are polls created"   # what a code/semantic query retrieves
+python -m multisync.cli.context_search --repo owner/name --gar "Participants pick the times that work for them."   # GAR-style query
 ```
 
 - **Semantic sources.** Besides the repo's README and `docs/`, a repo can list extra existing documentation in `docs` globs (for example an end-user docs app), and the pages of the central documentation site itself are indexed as `site_doc` (`SITE_REPO` + `SITE_DIR`, or `bootstrap_context.js --site-dir`). Everything is searched with the GAR paragraphs.
@@ -97,7 +97,7 @@ The key is chosen per repo (`style`) or per page (`kind`). `prompt` becomes the 
 
 ### LangGraph stages and logging
 
-The cascade is a LangGraph `StateGraph` (`pipeline/pipeline.js`). Nodes: `prefilter` → `cross_repo` → `similarity` → `gar` → `write_draft` → `judge` → (`polish_draft` | `widen`) → `publish` or `fallback`.
+The cascade is a LangGraph `StateGraph` (`multisync/pipeline.py`). Nodes: `prefilter` → `cross_repo` → `similarity` → `gar` → `write_draft` → `judge` → (`polish_draft` | `widen`) → `publish` or `fallback`.
 
 Every node execution is logged with its status, duration and decision data (for example `minChunkSimilarity`, `precision`, `topK`):
 
@@ -133,15 +133,15 @@ Tickets go through either the cAImanDesk MCP server (`CAIMANDESK_TRANSPORT=mcp`)
 ## Demo
 
 ```bash
-npm run demo:offline     # rehearsal: scripted LLM, in-memory stores, no keys needed
-npm run demo             # live: real LLM + embeddings, Qdrant, Postgres, cAImanDesk
+python -m multisync.cli.demo --offline   # rehearsal: scripted LLM, in-memory stores, no keys needed
+python -m multisync.cli.demo             # live: real LLM + embeddings, Qdrant, Postgres, cAImanDesk
 ```
 
 Five scenarios, each printing its stage trail: first publish, near-duplicate (cosine short-circuit, no LLM), structural change (overrides similarity), cross-repo block (fallback + ticket, no LLM), and judge fallback (precision forced above 1.0, so the loop widens and escalates + ticket). The live demo needs the variables in `.env.example`; `SIMILARITY_HIGH` defaults to 0.85 there and must be calibrated against real embeddings.
 
 ## Onboarding a repository
 
-[docs/ONBOARD-A-REPO.md](docs/ONBOARD-A-REPO.md): declare the repo, run the free dry run (`scripts/onboard_check.js`: what would be indexed, the embedding cost, what each page can actually see, sensitive files), load its embeddings with Bootstrap Context, verify with `context_search.js`, run one page, then connect the source workflow.
+[docs/ONBOARD-A-REPO.md](docs/ONBOARD-A-REPO.md): declare the repo, run the free dry run (`multisync/cli/onboard_check.py`: what would be indexed, the embedding cost, what each page can actually see, sensitive files), load its embeddings with Bootstrap Context, verify with `context_search.py`, run one page, then connect the source workflow.
 
 ## CI/CD
 
@@ -152,7 +152,9 @@ Five scenarios, each printing its stage trail: first publish, near-duplicate (co
 | Path | Purpose |
 |---|---|
 | `pipeline/` | the decision pipeline (config, llm, structure, prefilter, vectorstore, factstore, registry, writer, critic, fallback) |
-| `scripts/` | CLI entry points: `run_pipeline.js`, `bootstrap_context.js`, `onboard_check.js`, `context_search.js`, `index_approved.js`, `healthcheck.js`, `doctor.js`, `generate-summary.js`, `demo.js` |
+| `multisync/` | the Python package: `pipeline.py` (the LangGraph graph), `router.py`, `verify.py`, `context.py`, `factstore.py`, `vectorstore.py`, `tickets.py`, `webhook.py` and more |
+| `multisync/cli/` | commands, run as `python -m multisync.cli.<name>`: `run_pipeline`, `bootstrap_context`, `onboard_check`, `context_search`, `index_approved`, `healthcheck`, `doctor`, `generate_summary`, `factstore`, `review_ticket`, `demo` |
+| `scripts/job-entrypoint.sh` | what an ephemeral Job runs: clone, pipeline, PR, ticket |
 | `config/repos.json` | per-repo trust level, docs folder, style guide, glossary |
 | `config/feature-registry.json` | contract-point symbol → repos that must also ship |
 | `infra/` | docker-compose stack, k8s manifests for the `multirepo` namespace (migrate Job, webhook receiver that starts the pipeline as ephemeral Jobs) and a standalone variant |
@@ -161,7 +163,7 @@ Five scenarios, each printing its stage trail: first publish, near-duplicate (co
 
 ## What you still need to provide
 
-See [docs/SETUP-REQUIRED.md](docs/SETUP-REQUIRED.md): infrastructure diagram with what is missing, every credential and where to get it, and the order of operations. `node scripts/doctor.js` checks them.
+See [docs/SETUP-REQUIRED.md](docs/SETUP-REQUIRED.md): infrastructure diagram with what is missing, every credential and where to get it, and the order of operations. `python -m multisync.cli.doctor` checks them.
 
 ## Quick start
 

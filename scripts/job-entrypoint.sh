@@ -20,7 +20,7 @@ cd "$WORK"
 step "preflight: Qdrant and the FactStore must be reachable"
 INTERNAL_AI_API_KEY=${INTERNAL_AI_API_KEY:-${AI_API_KEY:-}}
 export INTERNAL_AI_API_KEY
-(cd "$TOOL" && node scripts/healthcheck.js)
+(cd "$TOOL" && python -m multisync.cli.healthcheck)
 
 [ -n "${DOCS_SYNC_PAT:-}" ] || fail "DOCS_SYNC_PAT is not set in the multisync-secrets Secret (needed to clone the repos and open the review PR)"
 export GH_TOKEN=$DOCS_SYNC_PAT GITHUB_TOKEN=$DOCS_SYNC_PAT
@@ -50,10 +50,10 @@ if [ "$MODE" = "index" ]; then
     [ -n "$f" ] || continue
     mkdir -p "/tmp/removed/$(dirname "$f")"; git show "$BASE_SHA:$f" > "/tmp/removed/$f"
   done
-  [ "${#CHANGED[@]}" -eq 0 ] || node "$TOOL/scripts/index_approved.js" "${CHANGED[@]}"
+  [ "${#CHANGED[@]}" -eq 0 ] || python -m multisync.cli.index_approved "${CHANGED[@]}"
   if [ "${#REMOVED[@]}" -gt 0 ]; then
     GONE=(); for f in "${REMOVED[@]}"; do GONE+=("/tmp/removed/$f"); done
-    node "$TOOL/scripts/index_approved.js" --delete "${GONE[@]}"
+    python -m multisync.cli.index_approved --delete "${GONE[@]}"
   fi
   echo "indexed ${#CHANGED[@]} page(s), removed ${#REMOVED[@]}"
   exit 0
@@ -89,7 +89,7 @@ export SITE_REPO="$CENTRAL_REPO" SITE_DIR="$PWD" DOC_STYLES="$PWD/config/doc-sty
 export REPOS_CONFIG="$PWD/config/repos.json" FEATURE_REGISTRY="$PWD/config/feature-registry.json"
 export INSTRUCTIONS_FILE="$TOOL/.github/instructions/DocumentationInstructions.instructions.md" TEMPLATES_PATH="$TOOL/docs/templates"
 [ ! -f prompts/judge-docs.md ] || export PROMPTS_DIR="$PWD/prompts"
-node "$TOOL/scripts/run_pipeline.js"
+python -m multisync.cli.run_pipeline
 
 step "publish"
 mapfile -t PUB < <(jq -r '.results[] | select(.outcome=="published" and .action!="none") | .targetPath' pipeline-results.json)
@@ -100,7 +100,7 @@ if [ "${#PUB[@]}" -gt 0 ]; then
 fi
 
 mapfile -t REV < <(jq -r '.results[] | select(.outcome=="pending_review" and .action!="none") | .targetPath' pipeline-results.json)
-if [ "${#REV[@]}" -eq 0 ]; then echo "nothing needs review"; node "$TOOL/scripts/generate-summary.js" || true; exit 0; fi
+if [ "${#REV[@]}" -eq 0 ]; then echo "nothing needs review"; python -m multisync.cli.generate_summary || true; exit 0; fi
 
 SHORT=${SHA:0:7}
 BR="docs-sync/$(echo "$SOURCE_REPO" | tr '/' '-')-$SHORT"
@@ -120,7 +120,7 @@ echo "PR: $PR_URL"
 
 step "review ticket"
 export PR_URL ENVIRONMENT=${REVIEW_ENVIRONMENT_NAME:-QA}
-OUT=$(node "$TOOL/scripts/review_ticket.js" open || true)
+OUT=$(python -m multisync.cli.review_ticket open || true)
 echo "$OUT"
 MARKER=$(echo "$OUT" | tail -1 | jq -r '.marker // empty' 2>/dev/null || true)
 URL=$(echo "$OUT" | tail -1 | jq -r '.url // empty' 2>/dev/null || true)
@@ -129,4 +129,4 @@ if [ -n "$MARKER" ]; then
   printf '\nTicket: %s\n\n%s\n' "$URL" "$MARKER" >> pr-body-new.md
   gh pr edit "$BR" --repo "$CENTRAL_REPO" --body-file pr-body-new.md
 fi
-node "$TOOL/scripts/generate-summary.js" || true
+python -m multisync.cli.generate_summary || true

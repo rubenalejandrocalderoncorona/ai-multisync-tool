@@ -1,6 +1,6 @@
 # What is in place, and what you still need to provide
 
-Run `node scripts/doctor.js` at any time. It checks every item below (never printing a secret) and lists what is missing.
+Run `python -m multisync.cli.doctor` at any time. It checks every item below (never printing a secret) and lists what is missing.
 
 See [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md) to connect a repository (worked example: CalendarScheduler into the QA and production documentation site).
 
@@ -149,13 +149,13 @@ You provide the model. The writer, analyst, planner and judge all use the OpenAI
 
 ## 5. First successful run
 
-1. Deploy to the cluster (table above) and run `node scripts/doctor.js` until clean.
+1. Deploy to the cluster (table above) and run `python -m multisync.cli.doctor` until clean.
 2. In the central repo run **Bootstrap Context** for one project (for example `rubenalejandrocalderoncorona/raibis-lifeos`, mode `code`). Check the run log: the whole repo is now in Qdrant (`code chunks`, `semantic chunks`).
 3. Copy `sync-docs-source.yml` into that project with `SYNC_MODE: 'code'`, push a small change, and watch the **Sync Documentation** run. Read each node line: similarity score, facts found, plan sections, judge scores.
 4. Review the pull request it opens. Merging is the human approval that indexes the page.
 5. To see the fallback path, set `PRECISION_MIN=1.01` as a repo variable for one run: the judge loop widens, escalates, and a ticket appears in cAImanDesk.
 
-To rehearse steps 2 to 4 from your laptop first, open a tunnel (`ssh -L 16334:<qdrant ClusterIP>:6333 -L 15433:<postgres ClusterIP>:5432 vps`), export `QDRANT_URL`, `FACTSTORE_DATABASE_URL` and `INTERNAL_AI_API_KEY`, then run `node scripts/bootstrap_context.js --repo owner/name --dir <checkout>`.
+To rehearse steps 2 to 4 from your laptop first, open a tunnel (`ssh -L 16334:<qdrant ClusterIP>:6333 -L 15433:<postgres ClusterIP>:5432 vps`), export `QDRANT_URL`, `FACTSTORE_DATABASE_URL` and `INTERNAL_AI_API_KEY`, then run `python -m multisync.cli.bootstrap_context --repo owner/name --dir <checkout>`.
 
 ## 6. Still to calibrate with real data
 

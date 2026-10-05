@@ -27,19 +27,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: 22
-          cache: npm
-      # Runtime dependencies only: proves the pipeline needs nothing from the Astro site tooling.
-      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
-      - run: npm test
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: webhook/go.mod
-      - name: Webhook receiver (signature, event filtering, Job manifest)
-        working-directory: webhook
-        run: go vet ./... && go test ./...
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest tests --ignore=tests/integration
 
   integration:
     name: Integration (real Qdrant + Postgres)
@@ -65,11 +59,12 @@ jobs:
       FACTSTORE_DATABASE_URL: postgres://factstore:ci-only-password@127.0.0.1:5432/factstore
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
       - name: Wait for Qdrant
         run: |
           for _ in $(seq 1 30); do curl -fsS "$QDRANT_URL/readyz" >/dev/null && exit 0; sleep 2; done
@@ -78,7 +73,7 @@ jobs:
         run: |
           sudo apt-get install -y -qq postgresql-client >/dev/null
           PGPASSWORD=ci-only-password psql -h 127.0.0.1 -U factstore -d factstore -v ON_ERROR_STOP=1 -f infra/postgres/init.sql
-      - run: npm run test:integration
+      - run: python -m pytest tests/integration
 
   validate:
     name: Lint workflows, validate infra, scan for secrets
@@ -114,15 +109,15 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.pipeline
+          file: Dockerfile
           load: true
           tags: ai-multysinc-pipeline:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test the image
         run: |
-          docker run --rm ai-multysinc-pipeline:ci node -e "require('./pipeline/pipeline'); require('./pipeline/context'); console.log('image loads the pipeline')"
-          docker run --rm -e VECTOR_DRIVER=memory -e FACTSTORE_DRIVER=memory ai-multysinc-pipeline:ci node scripts/doctor.js --env-only || true
+          docker run --rm ai-multysinc-pipeline:ci python -c "import multisync.pipeline, multisync.context, multisync.webhook; print('image loads the pipeline and the webhook')"
+          docker run --rm -e VECTOR_DRIVER=memory -e FACTSTORE_DRIVER=memory ai-multysinc-pipeline:ci python -m multisync.cli.doctor --env-only || true
           docker run --rm ai-multysinc-pipeline:ci sh -c 'test -f prompts/judge-code.md && test -f config/doc-styles.json && test -f infra/postgres/init.sql'
 
   publish:
@@ -156,7 +151,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.pipeline
+          file: Dockerfile
           push: true
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}

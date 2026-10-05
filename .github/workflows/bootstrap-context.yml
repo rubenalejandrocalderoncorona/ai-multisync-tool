@@ -56,13 +56,12 @@ jobs:
           path: source-repo
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: '22'
+          python-version: '3.12'
 
       - name: Install pipeline dependencies
-        working-directory: .multisync
-        run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+        run: pip install --no-cache-dir -r .multisync/requirements.txt
 
       - name: Load code + semantic context into the vector database
         env:
@@ -76,4 +75,4 @@ jobs:
           QDRANT_CODE_COLLECTION: ${{ vars.QDRANT_CODE_COLLECTION || 'code_context' }}
           FACTSTORE_DATABASE_URL: ${{ secrets.FACTSTORE_DATABASE_URL }}
           REPOS_CONFIG: ${{ github.workspace }}/config/repos.json
-        run: node .multisync/scripts/bootstrap_context.js --repo "$SOURCE_REPO" --dir source-repo --full
+        run: PYTHONPATH=.multisync python -m multisync.cli.bootstrap_context --repo "$SOURCE_REPO" --dir source-repo --full

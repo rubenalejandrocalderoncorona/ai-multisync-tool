@@ -1,4 +1,4 @@
--- FactStore schema. Idempotent: safe to run on every start (compose init, k8s Job, scripts/healthcheck.js).
+-- FactStore schema. Idempotent: safe to run on every start (compose init, k8s Job, multisync/cli/healthcheck.py).
 -- Everything lives in its own schema so the app can share a database with other workloads safely.
 CREATE SCHEMA IF NOT EXISTS multisync;
 SET search_path TO multisync;

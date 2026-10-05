@@ -1,0 +1,10 @@
+.git
+.venv
+tests
+docs/*
+!docs/templates
+examples
+**/__pycache__
+.pytest_cache
+demo-output
+*.egg-info

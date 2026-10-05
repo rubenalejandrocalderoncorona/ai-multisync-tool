@@ -3,7 +3,7 @@
 | Path | Purpose |
 |---|---|
 | `docker-compose.yml` | VPS stack: Qdrant + Postgres (FactStore), optional Caddy TLS edge, one-shot healthcheck |
-| `postgres/init.sql` | FactStore schema (idempotent; also applied by `scripts/healthcheck.js`) |
+| `postgres/init.sql` | FactStore schema (idempotent; also applied by `multisync/cli/healthcheck.py`) |
 | `k8s/` | Kustomize base mirroring the compose stack (StatefulSets + PVCs, probes, migrate Job) |
 
 ## Compose to Kubernetes mapping

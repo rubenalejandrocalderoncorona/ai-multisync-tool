@@ -26,4 +26,4 @@ There is no runner any more: a webhook receiver starts one Job per event ([WEBHO
 The keys shared during development (OpenAI, DeepSeek, Postgres password, cAImanDesk token) should be rotated; update the GitHub
 secrets and the cluster secrets with the new values.
 
-Check everything with `node scripts/doctor.js`.
+Check everything with `python -m multisync.cli.doctor`.
