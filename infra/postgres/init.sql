@@ -143,3 +143,26 @@ CREATE TABLE IF NOT EXISTS review_outcomes (
   UNIQUE (pr_url, change_unit_id)
 );
 CREATE INDEX IF NOT EXISTS review_outcomes_segment_idx ON review_outcomes (diff_classification, model_tier_used, policy_version);
+
+-- Audit sampling: a share of the drafts a reviewer merged unchanged is checked again by a SECOND person, who confirms the page's facts against the
+-- code without seeing the first reviewer's outcome. "Unchanged" does not prove "correct"; the gap between the two is the rubber-stamp signal.
+-- Detection and reporting only; nothing reads these columns to approve or route anything.
+ALTER TABLE review_outcomes ADD COLUMN IF NOT EXISTS audit_sampled          BOOLEAN     NOT NULL DEFAULT FALSE;
+ALTER TABLE review_outcomes ADD COLUMN IF NOT EXISTS audit_reviewer         TEXT;
+ALTER TABLE review_outcomes ADD COLUMN IF NOT EXISTS audit_verified_accurate BOOLEAN;
+ALTER TABLE review_outcomes ADD COLUMN IF NOT EXISTS audit_notes            TEXT;
+ALTER TABLE review_outcomes ADD COLUMN IF NOT EXISTS audited_at             TIMESTAMPTZ;
+DO $$ BEGIN
+  ALTER TABLE review_outcomes ADD CONSTRAINT review_outcomes_audit_other_reviewer
+    CHECK (audit_reviewer IS NULL OR reviewed_by IS NULL OR lower(audit_reviewer) <> lower(reviewed_by));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE review_outcomes ADD CONSTRAINT review_outcomes_audit_only_if_sampled
+    CHECK (audit_sampled OR (audit_reviewer IS NULL AND audit_verified_accurate IS NULL AND audit_notes IS NULL AND audited_at IS NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE review_outcomes ADD CONSTRAINT review_outcomes_audit_verdict_complete
+    CHECK (audit_verified_accurate IS NULL OR (audit_reviewer IS NOT NULL AND audited_at IS NOT NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- The audit queue is the set of sampled rows without a verdict.
+CREATE INDEX IF NOT EXISTS review_outcomes_audit_idx ON review_outcomes (diff_classification, model_tier_used) WHERE audit_sampled;

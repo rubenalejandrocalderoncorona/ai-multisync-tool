@@ -10,6 +10,7 @@ import os
 import sys
 
 from ..review_outcomes import GitHub, record
+from ..tickets import create_tickets
 from ..wiring import build_deps
 
 
@@ -20,7 +21,16 @@ def main() -> int:
         d = build_deps()
         gh = GitHub(env["CENTRAL_REPO"], env.get("GITHUB_TOKEN") or env["DOCS_SYNC_PAT"])
         d["facts"].migrate()
-        result = record(d["facts"], gh, number, env["PR_URL"], env.get("REVIEWED_BY") or None, env.get("REVIEWED_AT") or None, env.get("PR_MERGED") == "true")
+        tickets = create_tickets(d["cfg"]["alerts"])
+
+        def open_ticket(audit_id, row):  # the audit queue is the table; the ticket is how the second reviewer hears about it
+            repo, _, rest = row["change_unit_id"].partition("@")
+            commit, _, page = rest.partition(":")
+            url = tickets.open_audit(audit_id, repo, commit, page)
+            if url:
+                print(f"audit {audit_id} requested: {url}")
+
+        result = record(d["facts"], gh, number, env["PR_URL"], env.get("REVIEWED_BY") or None, env.get("REVIEWED_AT") or None, env.get("PR_MERGED") == "true", on_sampled=open_ticket)
         print(json.dumps(result))
         d["facts"].close()
     except Exception as e:  # noqa: BLE001 - logging must never fail the job that carries it

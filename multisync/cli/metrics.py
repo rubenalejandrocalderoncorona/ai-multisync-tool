@@ -2,6 +2,7 @@
 
   multisync metrics review-readiness --segment <diff_classification>:<model_tier> [--threshold 0.85] [--min-samples 30] [--confidence 1.96]
                                      [--policy-version v1-xxxxxxxx] [--json]
+  multisync metrics audit-gap        --segment <diff_classification>:<model_tier> [--max-gap 10] [--min-audits 5] [--policy-version ...] [--json]
 
 Segment: internal|public_interface : cheap|expensive, for example public_interface:expensive.
 Reports the Wilson score lower bound of the share of drafts a reviewer merged unchanged (draft_with_noedition) and whether it clears the threshold at
@@ -14,7 +15,7 @@ import json
 import os
 import sys
 
-from ..review_outcomes import SEGMENT_CLASSES, SEGMENT_TIERS, readiness
+from ..review_outcomes import SEGMENT_CLASSES, SEGMENT_TIERS, audit_gap, readiness
 from ..wiring import build_deps
 
 
@@ -35,7 +36,39 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--confidence", type=float, default=1.96, help="z value of the interval (1.96 = 95%%)")
     r.add_argument("--policy-version", default=None, help="only count outcomes produced under this policy version")
     r.add_argument("--json", action="store_true")
+    g = sub.add_parser("audit-gap", help="share of audited drafts a second reviewer confirmed accurate, against the raw no-edit rate: the rubber-stamp signal")
+    g.add_argument("--segment", required=True, type=parse_segment, metavar="CLASS:TIER")
+    g.add_argument("--max-gap", type=float, default=float(os.environ.get("AUDIT_MAX_GAP_PP", 10)), help="warn when audited accuracy is more than this many percentage points below the raw no-edit rate")
+    g.add_argument("--min-audits", type=int, default=int(os.environ.get("AUDIT_MIN_SAMPLES", 5)), help="audits with a verdict needed before a drift warning can be raised")
+    g.add_argument("--confidence", type=float, default=1.96)
+    g.add_argument("--policy-version", default=None)
+    g.add_argument("--json", action="store_true")
     return ap
+
+
+def run_audit_gap(args, facts) -> tuple[int, str]:
+    cls, tier = args.segment
+    res = audit_gap(facts.review_outcome_counts(cls, tier, args.policy_version), facts.audit_counts(cls, tier, args.policy_version), args.max_gap, args.min_audits, args.confidence)
+    code = 1 if res["drift_warning"] else 0
+    if args.json:
+        return code, json.dumps({"segment": f"{cls}:{tier}", "policy_version": args.policy_version, **res}, indent=1)
+    pct = res["pct_confirmed_accurate"]
+    lines = [
+        f"segment {cls}:{tier}" + (f"  policy {args.policy_version}" if args.policy_version else "  (all policy versions)"),
+        f"  raw no-edit rate        {res['raw_noedition_pct']:.1f}%   ({res['raw_noedition']} of {res['raw_n']} reviewed drafts merged unchanged)",
+        f"  audits                  {res['audit_sampled']} sampled, {res['audited']} with a verdict, {res['audit_pending']} pending",
+        "  confirmed accurate      " + (f"{pct:.1f}%   ({res['confirmed_accurate']} of {res['audited']}; 95% interval {res['accurate_wilson_lower_pct']:.1f} to {res['accurate_wilson_upper_pct']:.1f}%)" if pct is not None else "n/a (no audit has a verdict yet)"),
+        "  gap                     " + (f"{res['gap_pp']:+.1f} percentage points (raw minus audited), warning above {res['max_gap_pp']:g}" if res["gap_pp"] is not None else "n/a"),
+    ]
+    if res["drift_warning"]:
+        lines.append(f"  WARNING: audited accuracy is {res['gap_pp']:.1f} points below the raw no-edit rate (limit {res['max_gap_pp']:g}). Unedited is not the same as correct: "
+                     "reviews of this segment may be rubber-stamped.")
+    elif not res["enough_audits"]:
+        lines.append(f"  no verdict yet: {res['audited']} of the {res['min_audits']} audits needed before a drift warning can be raised")
+    else:
+        lines.append("  no drift: audited accuracy is within the limit of the raw no-edit rate")
+    lines.append("  (read-only: nothing is changed or approved on this basis)")
+    return code, "\n".join(lines)
 
 
 def run(args, facts) -> tuple[int, str]:
@@ -62,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         return int(e.code or 0) if isinstance(e.code, int) else 2
     d = build_deps()
     try:
-        code, text = run(args, d["facts"])
+        code, text = (run_audit_gap if args.command == "audit-gap" else run)(args, d["facts"])
     finally:
         d["facts"].close()
     print(text)

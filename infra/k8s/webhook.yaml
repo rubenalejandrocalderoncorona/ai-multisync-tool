@@ -87,6 +87,8 @@ data:
   ROUTER_FORCE: "auto"
   ROUTER_JUDGE: "expensive"
   REVIEW_ENVIRONMENT_NAME: "QA"
+  # Share of drafts merged unchanged that a second person re-checks against the code (docs/REVIEW-OUTCOMES.md). Detection only.
+  AUDIT_SAMPLE_RATE: "0.10"
   # Traces go to the self-hosted Phoenix in this namespace (infra/k8s/phoenix.yaml). The Jobs authenticate with PHOENIX_API_KEY from
   # multisync-secrets; without that key they still run, tracing just fails quietly.
   PHOENIX_COLLECTOR_ENDPOINT: "http://phoenix.multirepo.svc.cluster.local:6006"   # in-cluster, no /phoenix prefix
