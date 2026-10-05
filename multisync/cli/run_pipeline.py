@@ -33,6 +33,7 @@ from ..context import sync_context, sync_site
 from ..fallback import escalate
 from ..pipeline import process_change
 from ..prompts import load_styles
+from ..repofacts import profile_repo
 from ..sitedocs import read_site_file, site_commit, site_files
 from ..util import iso_now
 from ..wiring import apply_decision, build_deps
@@ -108,6 +109,13 @@ def main() -> None:
                                  code_store=d["codeVectors"], doc_store=d["vectors"], llm=d["llm"], facts=d["facts"], pages=policy.get("pages") or [],
                                  scope=pages_scope(policy.get("pages")), exclude=policy.get("exclude") or [], docs=policy.get("docs") or [])
             logger.log({**base0, "status": "ok", "ms": int((time.time() - t0) * 1000), "note": stats})
+            t2 = time.time()
+            base2 = {**base0, "node": "repo_facts", "at": iso_now()}
+            try:
+                pf = profile_repo(repo, commit, G.accessors(source_dir), d["facts"], d["llm"])
+                logger.log({**base2, "status": "skip" if pf["llmSkipped"] else "ok", "ms": int((time.time() - t2) * 1000), "note": pf})
+            except Exception as e:  # noqa: BLE001 - facts only enrich the context
+                logger.log({**base2, "status": "error", "ms": int((time.time() - t2) * 1000), "note": {"error": str(e)}})
         except Exception as e:  # noqa: BLE001
             context_error = e
             logger.log({**base0, "status": "error", "ms": int((time.time() - t0) * 1000), "note": {"error": str(e)}})

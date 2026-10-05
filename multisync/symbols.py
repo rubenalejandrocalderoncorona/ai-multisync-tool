@@ -84,6 +84,9 @@ def extract_public_symbols(file_path: str, text: str) -> list[dict]:
             _add(out, "export", m.group(1), m.group(0))
         for m in re.finditer(r"(?m)^type\s+([A-Z]\w*)\s+(struct|interface)", text):
             _add(out, "export", m.group(1), m.group(0))
+        # net/http (Go 1.22) patterns: mux.HandleFunc("GET /api/health", h)
+        for m in re.finditer(r"\.Handle(?:Func)?\(\s*\"(GET|POST|PUT|PATCH|DELETE)\s+(/[^\"]*)\"", text):
+            _add(out, "route", f"{m.group(1)} {m.group(2)}", m.group(0))
     if is_py:
         for m in re.finditer(r"(?m)^(?:async\s+)?def\s+([A-Za-z]\w*)\s*(\([^)]*\))?", text):
             _add(out, "export", m.group(1), m.group(0))

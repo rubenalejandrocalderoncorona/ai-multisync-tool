@@ -114,8 +114,18 @@ def test_factstore_real_postgres_schema_is_isolated_migrate_is_idempotent_everyt
         info = f.symbol_info("createPoll")
         assert {"repo": repo, "path": "a.ts", "kind": "export"} in info["defined"]
         assert any(r["doc_repo"] == f"{repo}-docs" for r in info["referencedBy"])
+
+        # facts about the repository as a whole, and the central run view
+        f.replace_repo_facts(repo, "deterministic", [{"category": "language", "fact": "x is mainly written in Go.", "evidence": "go.mod"}], "c1", None)
+        f.replace_repo_facts(repo, "llm", [{"category": "purpose", "fact": "x is a dashboard.", "evidence": "README"}], "c1", "h1")
+        assert {r["source"] for r in f.repo_facts(repo)} == {"deterministic", "llm"}
+        f.replace_repo_facts(repo, "deterministic", [], "c2", None)
+        assert [r["source"] for r in f.repo_facts(repo)] == ["llm"], "replacing one source leaves the other"
+        runs = f.list_runs(5, repo)
+        assert runs and runs[0]["run_id"] == "r1" and runs[0]["nodes"] == 1 and runs[0]["outcomes"] == {"fallback": 1}
+        assert [x["node"] for x in f.run_logs("r1") if x["repo"] == repo] == ["judge"]
     finally:
-        for t in ("claims", "decisions", "node_logs", "context_state", "symbols"):
+        for t in ("claims", "decisions", "node_logs", "context_state", "symbols", "repo_facts"):
             f._q(f"DELETE FROM {t} WHERE repo=%s", (repo,))
         f._q("DELETE FROM doc_refs WHERE doc_repo LIKE %s", (f"{repo}%",))
         f.close()
@@ -178,7 +188,7 @@ def test_end_to_end_real_qdrant_and_postgres_bootstrap_then_a_code_mode_run_publ
 
         # 3. audit trail is in Postgres, in order, and the approved page is now in the semantic index
         nodes = [x["node"] for x in f._q("SELECT node FROM node_logs WHERE run_id=%s AND repo=%s ORDER BY id", (run_id, repo))]
-        assert nodes == ["sync_context", "prefilter", "cross_repo", "route", "similarity", "code_context", "gar", "semantic_context", "write_draft", "verify_draft", "judge", "publish"]
+        assert nodes == ["sync_context", "repo_facts", "prefilter", "cross_repo", "route", "similarity", "code_context", "gar", "semantic_context", "write_draft", "verify_draft", "judge", "publish"]
         assert f._q("SELECT outcome FROM decisions WHERE run_id=%s AND repo=%s", (run_id, repo))[0]["outcome"] == "published"
         assert len(docs.search([0.1] * 64, limit=20, repo=repo, kind="approved")) >= 1, "auto-trust publish indexed the approved page"
         assert len(f.approved_claims(repo, "api.md")) >= 1, "claims were approved into the FactStore"

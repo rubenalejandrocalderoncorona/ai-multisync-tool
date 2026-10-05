@@ -35,6 +35,7 @@ from .critic import evaluate, judge as run_judge
 from .prefilter import prefilter
 from .registry import cross_repo_check
 from .router import route_change
+from .repofacts import facts_text
 from .stages import analyze_code, plan_docs, plan_text, sheet_text
 from .symbols import public_symbols
 from .util import iso_now
@@ -284,7 +285,9 @@ def process_change(change: dict, deps) -> dict:
             template = open(s["templatePath"], encoding="utf-8").read()
         else:
             template = ""
-        res = plan_docs(llm, sheet=s["factSheet"], brief=change.get("brief"), style_text=style_txt, existing=change.get("existing"), related=related, template=template, tier=s["tier"])
+        repo_facts = facts_text(facts.repo_facts(change["repo"])) if hasattr(facts, "repo_facts") else ""
+        res = plan_docs(llm, sheet=s["factSheet"], brief=change.get("brief"), style_text=style_txt, existing=change.get("existing"), related=related, template=template,
+                        tier=s["tier"], repo_facts=repo_facts)
         plan = res["plan"]
         return {
             "note": {"queries": len(s["garQueries"]) + 3, "garQueries": len(s["garQueries"]), "related": len(related), "kinds": list(dict.fromkeys(c["kind"] for c in related)),
@@ -305,6 +308,8 @@ def process_change(change: dict, deps) -> dict:
         template_path = None if mode == "code" else W.select_template(llm, file_path=change["filePath"], content=change["after"],
                                                                       template_files=deps.get("templateFiles") or [], default_template=deps.get("defaultTemplate"))
         known_facts = facts.approved_claims(change["repo"], change["filePath"])
+        if hasattr(facts, "repo_facts"):
+            known_facts = [*known_facts, *[r["fact"] for r in facts.repo_facts(change["repo"])]]  # the judge may rely on verified repo facts
         return {
             "note": {"template": os.path.basename(template_path) if template_path else f"outline:{style['key'] or 'none'}", "knownFacts": len(known_facts), "style": style["key"],
                      "styleFallback": style.get("fallback"), "reusedHypothetical": bool(s.get("hypothetical")), "garParagraphs": len(gar["paragraphs"]),
@@ -455,6 +460,7 @@ def process_change(change: dict, deps) -> dict:
     final = app.invoke(initial_state(change), {
         "configurable": {"thread_id": f"{run_id}:{change['repo']}:{change['filePath']}"},
         "recursion_limit": int(25 + t["maxIterations"] * 8),
-        "run_name": "docs-sync-decision", "tags": ["docs-sync", change["repo"]],
+        "run_name": f"docs-sync {change['repo']} {change['filePath']}", "tags": ["docs-sync", change["repo"], f"mode:{mode}"],
+        "metadata": {"repo": change["repo"], "page": change["filePath"], "commit": change["commit"], "run_id": run_id, "mode": mode, "style": style["key"]},
     })
     return {**final["decision"], "trail": final["trail"]}

@@ -17,6 +17,7 @@ from .. import gitutil as G
 from ..codesource import pages_scope
 from ..config import repo_policy
 from ..context import sync_context, sync_site
+from ..repofacts import profile_repo
 from ..sitedocs import read_site_file, site_commit, site_files
 from ..util import arg_value
 from ..wiring import build_deps
@@ -37,6 +38,11 @@ def main(argv: list[str]) -> None:
                          llm=d["llm"], facts=d["facts"], pages=policy.get("pages") or [], scope=pages_scope(policy.get("pages")),
                          exclude=policy.get("exclude") or [], docs=policy.get("docs") or [])
     print(f"bootstrapped {repo}@{commit[:7]}: {stats['repoFiles']} files, {stats['codeChunks']} code chunks, {stats['docChunks']} semantic chunks, {stats['ms']}ms")
+    try:
+        pf = profile_repo(repo, commit, G.accessors(directory), d["facts"], d["llm"])
+        print(f"repo facts: {pf['deterministic']} deterministic, {pf['llm']} from the README ({pf['llmDropped']} dropped for lacking a verbatim quote)")
+    except Exception as e:  # noqa: BLE001 - facts only enrich the context; the load above already succeeded
+        print(f"repo facts skipped: {e}", file=sys.stderr)
     print(f"vector DB now holds {d['codeVectors'].count(repo)} code chunks and {d['vectors'].count(repo)} semantic chunks for {repo}")
     if arg_value(argv, "site-dir") and arg_value(argv, "site-repo"):
         sd = os.path.abspath(arg_value(argv, "site-dir"))

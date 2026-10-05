@@ -40,14 +40,14 @@ def analyze_code(llm, *, page, style_key, changed_files, repo_map, code, related
     return {"sheet": {"summary": _str(r.get("summary")), "facts": facts, "unclear": unclear}, "promptId": prompt["id"], "dropped": len(raw_facts) - len(facts)}
 
 
-def plan_docs(llm, *, sheet, brief, style_text, existing, related, template, tier=None) -> dict:
+def plan_docs(llm, *, sheet, brief, style_text, existing, related, template, tier=None, repo_facts="") -> dict:
     """STAGE 2: semantic context -> documentation plan. Returns {plan, promptId}."""
     prompt = P.load_prompt("plan-docs")
     related_docs = "\n---\n".join(f"[{c.get('kind')}] {c.get('heading') or c.get('path')}: {c['text'][:700]}" for c in related) or "(none retrieved)"
     r = _json_stage(llm, [
         {"role": "system", "content": prompt["text"]},
         {"role": "user", "content": f"FACT_SHEET:\n{json.dumps(sheet, indent=1, ensure_ascii=False)}\n\nPAGE_BRIEF:\n{brief or '(none)'}\n\nSTYLE:\n{style_text or '(none)'}\n\n"
-                                     f"EXISTING_PAGE:\n{existing or '(none)'}\n\nRELATED_DOCS:\n{related_docs}\n\nTEMPLATE:\n{template or '(none)'}"},
+                                     f"REPO_FACTS (verified facts about the whole repository; use them for framing, do not contradict them):\n{repo_facts or '(none)'}\n\nEXISTING_PAGE:\n{existing or '(none)'}\n\nRELATED_DOCS:\n{related_docs}\n\nTEMPLATE:\n{template or '(none)'}"},
     ], tier=tier)
     ids = {f["id"] for f in sheet["facts"]}
     sections = []
