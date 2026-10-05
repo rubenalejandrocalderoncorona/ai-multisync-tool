@@ -23,7 +23,7 @@ class FakeKube:
 def test_deploy_patches_the_image_waits_for_the_rollout_and_smoke_tests():
     k = FakeKube()
     out = deploy(k, "qa", IMG, sleep=lambda s: None, fetch=lambda u: 200)
-    assert out.endswith("/documentation/qa/ -> 200")
+    assert "docs-qa.multirepo.svc.cluster.local/documentation/qa/ -> 200" in out
     method, path, body, ctype = k.calls[0]
     assert (method, path) == ("PATCH", "/apis/apps/v1/namespaces/multirepo/deployments/docs-qa")
     assert body["spec"]["template"]["spec"]["containers"] == [{"name": "nginx", "image": IMG}]
