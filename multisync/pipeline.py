@@ -349,7 +349,12 @@ def process_change(change: dict, deps) -> dict:
         if change.get("before"):
             names = ((s.get("routeInfo") or {}).get("signals") or {}).get("publicChanged") or []
         else:
-            names = [x["name"] for x in public_symbols(change["after"]).values()]
+            # A page written from scratch: require the symbols that define the interface (routes, RPC procedures, schema models). Helpers, loggers and
+            # environment variables are public to the symbol extractor but do not belong on every page; only when a repo has none of the former
+            # (a library) are its exported names the interface.
+            allsyms = list(public_symbols(change["after"]).values())
+            core = [x["name"] for x in allsyms if x["kind"] in ("route", "rpc", "model")]
+            names = core or [x["name"] for x in allsyms if x["kind"] == "export"]
         public_changed = names if mode == "code" else []
         plan = s.get("plan") or {}
         v = verify_draft(s["draft"], public_changed, change.get("existing") or "", change["filePath"], change.get("title") or None,
