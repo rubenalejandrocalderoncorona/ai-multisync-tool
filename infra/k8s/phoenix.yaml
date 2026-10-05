@@ -1,0 +1,73 @@
+# Arize Phoenix: self-hosted trace viewer for the LangGraph runs (see docs/OBSERVABILITY.md). Open source, one container, stores in the
+# existing Postgres (schema `phoenix`), served at https://rubenalejandrocalderoncorona.org/phoenix behind Phoenix's own login.
+#
+# Secret, created by hand once (never committed):
+#   kubectl -n multirepo create secret generic phoenix-secrets \
+#     --from-literal=PHOENIX_SECRET="$(openssl rand -hex 24)" \
+#     --from-literal=PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD="$(openssl rand -base64 18)" \
+#     --from-literal=PHOENIX_SQL_DATABASE_URL="<the FACTSTORE_DATABASE_URL value>"
+#   psql ... -c 'CREATE SCHEMA IF NOT EXISTS phoenix'
+# First login: admin@localhost with the initial password above; Phoenix asks for a new one. Then Settings, System keys: create a key and put it in
+# multisync-secrets as PHOENIX_API_KEY so the Jobs may send traces.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: phoenix
+  namespace: multirepo
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: phoenix }
+  template:
+    metadata:
+      labels: { app: phoenix }
+    spec:
+      enableServiceLinks: false   # a Service named "phoenix" would inject PHOENIX_PORT=tcp://..., which Phoenix cannot parse
+      containers:
+        - name: phoenix
+          image: arizephoenix/phoenix:version-20.19.0-nonroot
+          ports: [{ containerPort: 6006 }]
+          env:
+            - { name: PHOENIX_PORT, value: "6006" }
+            - { name: PHOENIX_ENABLE_AUTH, value: "True" }
+            - { name: PHOENIX_USE_SECURE_COOKIES, value: "True" }
+            - { name: PHOENIX_ROOT_URL, value: "https://rubenalejandrocalderoncorona.org/phoenix" }
+            - { name: PHOENIX_HOST_ROOT_PATH, value: "/phoenix" }
+            - { name: PHOENIX_SQL_DATABASE_SCHEMA, value: "phoenix" }
+            - { name: PHOENIX_WORKING_DIR, value: "/tmp/phoenix" }
+            - { name: PHOENIX_TELEMETRY_ENABLED, value: "false" }
+          envFrom:
+            - secretRef: { name: phoenix-secrets }
+          readinessProbe: { tcpSocket: { port: 6006 }, periodSeconds: 10, initialDelaySeconds: 10 }
+          livenessProbe: { tcpSocket: { port: 6006 }, periodSeconds: 30, initialDelaySeconds: 30 }
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: phoenix
+  namespace: multirepo
+spec:
+  selector: { app: phoenix }
+  ports: [{ name: http, port: 6006, targetPort: 6006 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: phoenix
+  namespace: multirepo
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: rubenalejandrocalderoncorona.org
+      http:
+        paths:
+          - { path: /phoenix, pathType: Prefix, backend: { service: { name: phoenix, port: { number: 6006 } } } }

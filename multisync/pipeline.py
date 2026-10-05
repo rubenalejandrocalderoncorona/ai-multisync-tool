@@ -27,6 +27,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from . import prompts as P
+from . import tracing
 from . import writer as W
 from .chunker import chunk_markdown
 from .context import retrieve_code, retrieve_semantic
@@ -164,6 +165,11 @@ def process_change(change: dict, deps) -> dict:
         def run(state):
             started = time.time()
             usage0 = llm.snapshot_usage() if hasattr(llm, "snapshot_usage") else None
+            with tracing.span(f"node:{name}", "CHAIN", **{"session.id": run_id, "multisync.node": name, "multisync.repo": change["repo"], "multisync.page": change["filePath"]}) as sp:
+                result = _run_node(name, fn, state, started, usage0, sp)
+            return result
+
+        def _run_node(name, fn, state, started, usage0, sp):
             try:
                 out = fn(state)
             except Exception as err:
@@ -173,6 +179,8 @@ def process_change(change: dict, deps) -> dict:
             update, note, status = out.get("update") or {}, out.get("note") or {}, out.get("status") or "ok"
             usage = _usage_delta(usage0, llm.snapshot_usage() if hasattr(llm, "snapshot_usage") else None)
             event = {**base, "node": name, "status": status, "ms": int((time.time() - started) * 1000), "note": {**note, "usage": usage} if usage else note, "at": iso_now()}
+            sp.set(**{"multisync.status": status, "multisync.ms": event["ms"]})
+            sp.io(output=event["note"])
             if logger:
                 logger.log(event)
             return {**update, "trail": [event]}
@@ -465,10 +473,16 @@ def process_change(change: dict, deps) -> dict:
     g.add_edge("fallback", END)
     app = g.compile(checkpointer=MemorySaver())
 
-    final = app.invoke(initial_state(change), {
-        "configurable": {"thread_id": f"{run_id}:{change['repo']}:{change['filePath']}"},
-        "recursion_limit": int(25 + t["maxIterations"] * 8),
-        "run_name": f"docs-sync {change['repo']} {change['filePath']}", "tags": ["docs-sync", change["repo"], f"mode:{mode}"],
-        "metadata": {"repo": change["repo"], "page": change["filePath"], "commit": change["commit"], "run_id": run_id, "mode": mode, "style": style["key"]},
-    })
+    with tracing.span(f"docs-sync {change['repo']} {change['filePath']}", "AGENT", **{"session.id": run_id, "multisync.repo": change["repo"], "multisync.page": change["filePath"],
+                                                                                      "multisync.commit": change["commit"], "multisync.mode": mode, "multisync.style": style["key"]}) as root:
+        root.io(input={"repo": change["repo"], "page": change["filePath"], "commit": change["commit"], "mode": mode, "brief": change.get("brief")})
+        final = app.invoke(initial_state(change), {
+            "configurable": {"thread_id": f"{run_id}:{change['repo']}:{change['filePath']}"},
+            "recursion_limit": int(25 + t["maxIterations"] * 8),
+            "run_name": f"docs-sync {change['repo']} {change['filePath']}", "tags": ["docs-sync", change["repo"], f"mode:{mode}"],
+            "metadata": {"repo": change["repo"], "page": change["filePath"], "commit": change["commit"], "run_id": run_id, "mode": mode, "style": style["key"]},
+        })
+        d = final["decision"]
+        root.set(**{"multisync.outcome": d.get("outcome"), "multisync.tier": d.get("tier"), "multisync.escalated": bool(d.get("escalated")), "multisync.cost_usd": (d.get("cost") or {}).get("usd")})
+        root.io(output=f"{d.get('outcome')}: {d.get('reason')}")
     return {**final["decision"], "trail": final["trail"]}

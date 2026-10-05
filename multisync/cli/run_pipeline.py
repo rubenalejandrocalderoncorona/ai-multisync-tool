@@ -35,11 +35,13 @@ from ..pipeline import process_change
 from ..prompts import load_styles
 from ..repofacts import profile_repo
 from ..sitedocs import read_site_file, site_commit, site_files
+from .. import tracing
 from ..util import iso_now
 from ..wiring import apply_decision, build_deps
 
 
 def main() -> None:
+    tracing.configure()
     env = os.environ
     d = build_deps()
     cfg = d["cfg"]
@@ -173,6 +175,7 @@ def main() -> None:
     count = lambda o: sum(1 for r in results if r["outcome"] == o)  # noqa: E731
     print(f"\npublished {count('published')} | pending_review {count('pending_review')} | refreshed {count('refreshed')} | skipped {count('skipped')} | fallback {count('fallback')}")
     d["facts"].close()
+    tracing.flush()
 
 
 if __name__ == "__main__":

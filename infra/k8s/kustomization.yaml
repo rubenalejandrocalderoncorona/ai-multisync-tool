@@ -7,4 +7,5 @@ namespace: multirepo
 resources:
   - migrate-job.yaml
   - webhook.yaml
+  - phoenix.yaml
 # NOT listed on purpose: secrets.example.yaml.
