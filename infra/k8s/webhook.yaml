@@ -89,7 +89,7 @@ data:
   REVIEW_ENVIRONMENT_NAME: "QA"
   # Traces go to the self-hosted Phoenix in this namespace (infra/k8s/phoenix.yaml). The Jobs authenticate with PHOENIX_API_KEY from
   # multisync-secrets; without that key they still run, tracing just fails quietly.
-  PHOENIX_COLLECTOR_ENDPOINT: "http://phoenix.multirepo.svc.cluster.local:6006/phoenix"
+  PHOENIX_COLLECTOR_ENDPOINT: "http://phoenix.multirepo.svc.cluster.local:6006"   # in-cluster, no /phoenix prefix
   PHOENIX_PROJECT_NAME: "multirepo-agent-docs"
 ---
 apiVersion: apps/v1
