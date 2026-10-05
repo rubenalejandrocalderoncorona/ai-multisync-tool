@@ -17,7 +17,10 @@ import urllib.request
 
 SA = "/var/run/secrets/kubernetes.io/serviceaccount"
 IMAGE_RE = re.compile(r"^ghcr\.io/[a-z0-9._/-]+:(qa|prod)-[0-9a-f]{12}$")
-URLS = {"prod": "https://rubenalejandrocalderoncorona.org/documentation/", "qa": "https://rubenalejandrocalderoncorona.org/documentation/qa/"}
+# The gate is the Service inside the cluster: it tests the new pods without depending on Cloudflare (which answers 403 to Python's default
+# User-Agent). The public URL is checked too, but only reported.
+PATHS = {"prod": "/documentation/", "qa": "/documentation/qa/"}
+PUBLIC = "https://rubenalejandrocalderoncorona.org"
 
 
 class Kube:
@@ -59,8 +62,8 @@ def deploy(kube, env_name: str, image: str, timeout: float = 180, poll: float = 
             raise RuntimeError(f"docs-{env_name} did not finish rolling out in {timeout:.0f}s")
         sleep(poll)
     print(f"docs-{env_name} rolled out")
-    url = URLS[env_name]
-    fetch = fetch or (lambda u: urllib.request.urlopen(u, timeout=10).status)
+    url = f"http://docs-{env_name}.{kube.ns}.svc.cluster.local{PATHS[env_name]}"
+    fetch = fetch or (lambda u: urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "multisync-deploy"}), timeout=10).status)
     code = None
     for _ in range(12):
         try:
@@ -68,9 +71,15 @@ def deploy(kube, env_name: str, image: str, timeout: float = 180, poll: float = 
         except Exception as e:  # noqa: BLE001
             code = str(e)
         if code == 200:
-            return f"{url} -> 200"
+            break
         sleep(5)
-    raise RuntimeError(f"{url} did not return 200 (last: {code})")
+    else:
+        raise RuntimeError(f"{url} did not return 200 (last: {code})")
+    try:
+        public = fetch(PUBLIC + PATHS[env_name])
+    except Exception as e:  # noqa: BLE001
+        public = str(e)
+    return f"{url} -> 200; public {PUBLIC + PATHS[env_name]} -> {public}"
 
 
 def main() -> int:
