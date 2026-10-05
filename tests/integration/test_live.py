@@ -116,11 +116,16 @@ def test_factstore_real_postgres_schema_is_isolated_migrate_is_idempotent_everyt
         assert any(r["doc_repo"] == f"{repo}-docs" for r in info["referencedBy"])
 
         # facts about the repository as a whole, and the central run view
-        f.replace_repo_facts(repo, "deterministic", [{"category": "language", "fact": "x is mainly written in Go.", "evidence": "go.mod"}], "c1", None)
-        f.replace_repo_facts(repo, "llm", [{"category": "purpose", "fact": "x is a dashboard.", "evidence": "README"}], "c1", "h1")
+        f.replace_repo_facts(repo, "deterministic", [{"category": "language", "fact": "x is mainly written in Go.", "evidence": "go.mod", "source": "deterministic", "source_path": "go.mod", "source_hash": "abc"}], "c1")
+        f.replace_repo_facts(repo, "llm", [{"category": "purpose", "fact": "x is a dashboard.", "evidence": "README", "source": "llm", "source_path": "README.md", "source_hash": "h1", "verification_method": "llm_quote_grounded"}], "c1")
+        assert {r["verification_method"] for r in f.repo_facts(repo)} == {"deterministic", "llm_quote_grounded"}
         assert {r["source"] for r in f.repo_facts(repo)} == {"deterministic", "llm"}
-        f.replace_repo_facts(repo, "deterministic", [], "c2", None)
+        f.replace_repo_facts(repo, "deterministic", [], "c2")
         assert [r["source"] for r in f.repo_facts(repo)] == ["llm"], "replacing one source leaves the other"
+        import psycopg
+
+        with pytest.raises(psycopg.errors.CheckViolation):
+            f._q("INSERT INTO repo_facts (repo, category, fact, evidence, source, verification_method) VALUES (%s,'x','bogus','e','llm','guess')", (repo,))
         runs = f.list_runs(5, repo)
         assert runs and runs[0]["run_id"] == "r1" and runs[0]["nodes"] == 1 and runs[0]["outcomes"] == {"fallback": 1}
         assert [x["node"] for x in f.run_logs("r1") if x["repo"] == repo] == ["judge"]
