@@ -15,7 +15,7 @@ See [INTEGRATE-A-REPO.md](INTEGRATE-A-REPO.md) to connect a repository (worked e
 | Documentation sites at `/documentation` and `/documentation/qa` (build, image, link check) | **Verified locally** | both images served correctly under their base paths |
 | Documentation sites **deployed** | **Done** (2026-10-04) | `docs-prod` and `docs-qa` run in `multirepo` from locally built images; `https://rubenalejandrocalderoncorona.org/documentation/` and `/documentation/qa/` return 200 through Cloudflare and directly at the origin. CI will later replace the local images with GHCR images |
 | CI/CD of the tool | Running on GitHub | unit, integration, lint and secret scan pass; image build fixed (it was missing `prompts/`) |
-| In-cluster GitHub runner | **Missing** | manifest written; needs its token |
+| Webhook receiver + ephemeral Jobs (replaces the runner) | **Deployed** | needs `DOCS_SYNC_PAT` in `multisync-secrets` and the GitHub webhooks, see [WEBHOOK-JOBS.md](WEBHOOK-JOBS.md) |
 | Secrets and variables on the central repo | **Missing** | section 4 |
 | The same run inside GitHub Actions | **Not done** | |
 
@@ -35,7 +35,7 @@ flowchart LR
   end
 
   subgraph K3S["VPS: k3s cluster, namespace multirepo"]
-    RUN["multisync-runner pod<br/>GitHub Actions runner"]
+    RUN["multisync-webhook pod<br/>starts one Job per event"]
     Q[("Qdrant<br/>docs_chunks: semantic context<br/>code_context: code context")]
     PG[("PostgreSQL<br/>schema multisync:<br/>claims, decisions,<br/>node_logs, context_state")]
     MIG["multisync-migrate Job"]
@@ -69,7 +69,7 @@ flowchart LR
   class Q,PG,SRC,SW,CW,TOOL,PR,MIG,GHCR have;
 ```
 
-Qdrant has no authentication, so it must stay cluster-internal. That is why the runner lives inside the cluster instead of exposing it.
+Qdrant has no authentication, so it must stay cluster-internal. That is why the pipeline runs as a Job inside the cluster instead of exposing it.
 
 ## 3. How one run works: two context stages
 
@@ -111,7 +111,7 @@ flowchart TD
 ```
 
 The two stages only run in `code` and `both` modes. In `docs` mode the source already is documentation, so they are skipped and cost nothing.
-Every node writes a row to `multisync.node_logs` and a line to the runner log.
+Every node writes a row to `multisync.node_logs` and a line to the Job log.
 
 ## 4. What you provide
 
@@ -121,7 +121,6 @@ Every node writes a row to `multisync.node_logs` and a line to the runner log.
 |---|---|---|
 | 1 | Pipeline image | merge to `main`: CI publishes `ghcr.io/<you>/ai-multysinc-pipeline`. Make the package readable by the cluster or add a pull secret |
 | 2 | Secret with the database URL | `kubectl -n multirepo create secret generic multisync-secrets --from-literal=FACTSTORE_DATABASE_URL='postgresql://<user>:<password>@postgres:5432/<database>'` (the values are in the existing `postgres-credentials` secret) |
-| 3 | Secret for the runner | `kubectl -n multirepo create secret generic multisync-runner --from-literal=ACCESS_TOKEN=<fine-grained PAT, Administration: read/write on the central repo>` |
 | 4 | Apply | run the **Deploy to cluster** workflow, or `kubectl kustomize infra/k8s \| sed "s#__PIPELINE_IMAGE__#<image>:<tag>#" \| kubectl apply -f -` |
 
 ### On the central repo `portfolio` (Settings > Secrets and variables > Actions)
@@ -135,7 +134,6 @@ Every node writes a row to `multisync.node_logs` and a line to the runner log.
 | secret | `QDRANT_API_KEY` | no | only if you add auth to Qdrant later |
 | secret | `SLACK_WEBHOOK_URL` | no | optional alerts |
 | variable | `QDRANT_URL` | yes | `http://qdrant:6333` |
-| variable | `RUNNER_LABEL` | yes | `multisync` (the in-cluster runner) |
 | variable | `CAIMANDESK_PROJECT_ID` | yes | number in the cAImanDesk project URL |
 | variable | `CAIMANDESK_TRANSPORT`, `CAIMANDESK_MCP_URL`, `CAIMANDESK_PUBLIC_URL` | no | default transport is `mcp` (Vikunja's built-in MCP, `<CAIMANDESK_URL>/api/v2/mcp`); set `CAIMANDESK_URL` to the in-cluster service and `CAIMANDESK_PUBLIC_URL` to the public address when running on the in-cluster runner |
 | variable | `REVIEW_ENVIRONMENT_NAME`, `QA_URL`, `QA_BRANCH`, `PROD_BRANCH` | no | defaults `QA`, `https://rubenalejandrocalderoncorona.org/documentation/qa/`, `qa`, `main` |

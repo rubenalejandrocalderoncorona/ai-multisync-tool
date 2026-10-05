@@ -1,11 +1,14 @@
 # Runs the sync pipeline / healthcheck as a container or a k8s Job/CronJob.
 FROM node:22-alpine
+# git, gh and jq: the on-demand Job clones the repos and opens the review PR itself (scripts/job-entrypoint.sh).
+RUN apk add --no-cache bash git jq github-cli
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev --ignore-scripts --no-audit --no-fund
 COPY pipeline ./pipeline
 COPY scripts ./scripts
+RUN chmod +x scripts/job-entrypoint.sh
 COPY infra/postgres ./infra/postgres
 COPY config ./config
 COPY prompts ./prompts

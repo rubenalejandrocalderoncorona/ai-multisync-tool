@@ -53,7 +53,7 @@ add-central-workflow:
 	@cp $(CURDIR)/.github/workflows/sync-docs-central.yml $(CURDIR)/.github/workflows/sync-docs-approved.yml .github/workflows/ 2>/dev/null || true
 	@echo "Commit both workflows to the DEFAULT branch of the central docs repo."
 	@echo "Secrets:   DOCS_SYNC_PAT, AI_API_KEY, QDRANT_API_KEY, FACTSTORE_DATABASE_URL"
-	@echo "Variables: QDRANT_URL (+ optional RUNNER_LABEL, AI_API_BASE_URL, AI_MODEL, AI_EMBED_MODEL, AI_EMBED_DIM)"
+	@echo "Variables: QDRANT_URL (+ optional AI_API_BASE_URL, AI_MODEL, AI_EMBED_MODEL, AI_EMBED_DIM)"
 
 add-source-workflow:
 	@mkdir -p .github/workflows

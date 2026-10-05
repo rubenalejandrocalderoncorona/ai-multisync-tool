@@ -6,6 +6,5 @@ kind: Kustomization
 namespace: multirepo
 resources:
   - migrate-job.yaml
-  - runner.yaml
-  - rbac-docs.yaml
+  - webhook.yaml
 # NOT listed on purpose: secrets.example.yaml.

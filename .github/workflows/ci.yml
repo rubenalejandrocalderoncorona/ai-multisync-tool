@@ -34,6 +34,12 @@ jobs:
       # Runtime dependencies only: proves the pipeline needs nothing from the Astro site tooling.
       - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
       - run: npm test
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: webhook/go.mod
+      - name: Webhook receiver (signature, event filtering, Job manifest)
+        working-directory: webhook
+        run: go vet ./... && go test ./...
 
   integration:
     name: Integration (real Qdrant + Postgres)
@@ -156,7 +162,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+      # Attestations are unavailable for private user-owned repositories; do not fail the publish over it.
       - uses: actions/attest-build-provenance@v2
+        continue-on-error: true
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/ai-multysinc-pipeline
           subject-digest: ${{ steps.push.outputs.digest }}

@@ -1,6 +1,6 @@
 name: Deploy to cluster
 
-# Manual. Applies infra/k8s (migrate Job + in-cluster runner) to the k3s cluster on the VPS over SSH.
+# Manual. Applies infra/k8s (migrate Job + webhook receiver that launches the pipeline Jobs) to the k3s cluster on the VPS over SSH.
 # The databases already exist in the `multirepo` namespace; this does not touch them.
 #
 # Needs an Environment named `vps` (add required reviewers there for an approval gate) with:

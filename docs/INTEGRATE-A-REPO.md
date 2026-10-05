@@ -7,10 +7,9 @@ Worked example: `cAImanLabs/cAImanLabsCalendarScheduler` into the documentation 
 
 ```mermaid
 flowchart LR
-  R["Repo<br/>cAImanLabsCalendarScheduler<br/>push to main"] --> SW["sync-docs.yml<br/>in that repo"]
-  SW -->|"repository_dispatch"| BB
+  R["Repo<br/>cAImanLabsCalendarScheduler<br/>push to main"] -->|"GitHub webhook"| BB
 
-  subgraph BB["BLACK BOX: central workflow, on the in-cluster runner"]
+  subgraph BB["BLACK BOX: an ephemeral Job in the cluster, started by a webhook"]
     direction TB
     B1["sync_context: whole repo into Qdrant"] --> B2["code_context: LLM stage 1"]
     B2 --> B3["GAR: hypothetical docs from the facts"]
@@ -61,17 +60,22 @@ A PR closed without merging leaves its ticket open with a note; nothing is index
 
 ## 3. Add the action to the source repo
 
-1. Copy [`examples/calendarscheduler/sync-docs.yml`](../examples/calendarscheduler/sync-docs.yml) to `.github/workflows/sync-docs.yml` in CalendarScheduler. It is set to `CENTRAL_REPO: rubenalejandrocalderoncorona/multirepo-agent-docs`, `TARGET_BRANCH: qa`, `SYNC_MODE: code`.
-2. Add the secret `DOCS_SYNC_PAT` to that repo. The source is in the `cAImanLabs` organization and the central repo is under your user, and a fine-grained token has a single resource owner. Use a **classic token** with `repo` and `workflow` scopes, or a GitHub App. It dispatches to the central repo, which then reads CalendarScheduler with the same token.
-3. Commit to `main`. The source repo needs no AI key and no other configuration.
+Preferred (no workflow in the source repo): add a **webhook** to the source repo, event "Pushes", payload URL
+`https://rubenalejandrocalderoncorona.org/api/sync-webhook`, content type JSON, secret from the cluster (see [WEBHOOK-JOBS.md](WEBHOOK-JOBS.md)).
+Add the repo to `ALLOWED_REPOS` in `infra/k8s/webhook.yaml`. The source repo needs no AI key, no secret and no workflow file.
+
+Alternative: copy [`examples/calendarscheduler/sync-docs.yml`](../examples/calendarscheduler/sync-docs.yml), which dispatches to the central repo's manual fallback workflow
+(it cannot reach Qdrant from GitHub-hosted runners).
+
+The token the cluster Job uses to clone and open PRs is `DOCS_SYNC_PAT` in the `multisync-secrets` Secret: a **classic token** with `repo` and `workflow`, because the source is in the `cAImanLabs` organization and the central repo is under your user (a fine-grained token has one owner).
 
 ## 4. Prepare the central repo (once)
 
 1. **Branches.** Create `qa` from `main`: `git push origin main:qa`. Protect both so only PRs change them.
 2. **Config.** `config/repos.json` already lists CalendarScheduler (three pages, glossary pinning the product name, and the `docs` globs that load its existing user guide as semantic context). Change it by PR.
-3. **Secrets and variables** on the repo (full list in [SETUP-REQUIRED.md](SETUP-REQUIRED.md)): `DOCS_SYNC_PAT`, `AI_API_KEY`, `FACTSTORE_DATABASE_URL`, `CAIMANDESK_API_TOKEN`; variables `QDRANT_URL=http://qdrant.multirepo.svc.cluster.local:6333`, `RUNNER_LABEL=multisync`, `CAIMANDESK_PROJECT_ID=10` (project "Multirepo-Syncs"); optional `DEEPSEEK_API_KEY` (cheap tier).
-4. **The sites.** Apply `deploy/k8s.yaml` once (two Deployments, two Services, one Ingress with the two prefixes) and the tool's runner manifests (`infra/k8s`, which include the RBAC that lets the runner update only `docs-qa` and `docs-prod`). Make the GHCR package public, or create the `ghcr-pull` secret described in `deploy/k8s.yaml`. Then set the variable `DEPLOY_ENABLED=true`.
-5. **Runner.** Deploy `infra/k8s/runner.yaml` (registered to this repo).
+3. **Secrets and variables** on the repo (only the manual fallback workflows read them; the Jobs read the cluster Secret `multisync-secrets` and ConfigMap `multisync-config`) (full list in [SETUP-REQUIRED.md](SETUP-REQUIRED.md)): `DOCS_SYNC_PAT`, `AI_API_KEY`, `FACTSTORE_DATABASE_URL`, `CAIMANDESK_API_TOKEN`; variables `QDRANT_URL=http://qdrant.multirepo.svc.cluster.local:6333`, `CAIMANDESK_PROJECT_ID=10` (project "Multirepo-Syncs"); optional `DEEPSEEK_API_KEY` (cheap tier).
+4. **The sites.** Apply `deploy/k8s.yaml` once (two Deployments, two Services, one Ingress with the two prefixes) and the tool's webhook manifests (`infra/k8s/webhook.yaml`, see [WEBHOOK-JOBS.md](WEBHOOK-JOBS.md)). Make the GHCR package public, or create the `ghcr-pull` secret described in `deploy/k8s.yaml`. Then set the variable `DEPLOY_ENABLED=true`.
+5. **Webhook receiver.** Deploy `infra/k8s/webhook.yaml` and add the GitHub webhooks ([WEBHOOK-JOBS.md](WEBHOOK-JOBS.md)). There is no standing runner.
 
 ## 5. First run
 
