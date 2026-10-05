@@ -218,3 +218,13 @@ def test_classification_does_not_depend_on_router_force():
     assert free["classification"] == forced["classification"] == "public_interface" and forced["tier"] == "cheap" and free["tier"] == "expensive"
     internal = {"kind": "code", "repo": "o/r", "filePath": "a.md", "before": "### FILE: a.ts\nfunction f(a) { return 1 }\n", "after": "### FILE: a.ts\nfunction f(a) { return 2 }\n"}
     assert route_change(internal)["classification"] == route_change(internal, force="expensive")["classification"] == "internal"
+
+
+def test_a_decision_stored_before_these_features_existed_is_skipped_never_given_guessed_labels():
+    facts = MemoryFactStore()
+    facts.record_decision({"runId": "old", "repo": "o/src", "path": "overview.md", "commit": "abc1234def0", "outcome": "pending_review",
+                           "metrics": {"final": {"precision": 1.0}, "minChunkSimilarity": 0.2}, "attempts": []})  # no diffClassification, modelTier, policyVersion
+    gh, _ = fake_github(PATHS, {})
+    result = record(facts, gh, 7, "https://x/pull/7", "ruben", "2026-10-05T12:00:00Z", merged=False)
+    assert result["rows"] == 0 and result["inserted"] == 0 and any("predates review-outcome features" in x for x in result["skipped"])
+    assert getattr(facts, "review_outcomes", []) == []

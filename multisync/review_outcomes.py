@@ -79,7 +79,7 @@ def _iso(ts: str | None) -> str | None:
     return ts or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def collect_rows(facts, gh, number: int, pr_url: str, reviewed_by: str | None, reviewed_at: str | None, merged: bool, default_policy: str = "unknown") -> tuple[list[dict], list[str]]:
+def collect_rows(facts, gh, number: int, pr_url: str, reviewed_by: str | None, reviewed_at: str | None, merged: bool) -> tuple[list[dict], list[str]]:
     """Rows for every draft of one closed docs-sync PR, and the reasons any page was skipped (no stored decision, an unreadable file...)."""
     pr = gh.pr(number)
     info = parse_pr_body(pr.get("body"))
@@ -95,6 +95,10 @@ def collect_rows(facts, gh, number: int, pr_url: str, reviewed_by: str | None, r
             continue
         m = d.get("metrics") or {}
         final = m.get("final") or {}
+        # Never guess the labels a segment is built from: a decision stored before these features were recorded is left out, not defaulted.
+        if m.get("diffClassification") not in SEGMENT_CLASSES or m.get("modelTier") not in SEGMENT_TIERS or not m.get("policyVersion"):
+            skipped.append(f"{page}: the stored decision predates review-outcome features (diff classification, model tier or policy version missing)")
+            continue
         if merged:
             target = next((f for f in files if f == page or f.endswith("/" + page)), None)
             if target is None:
@@ -106,13 +110,12 @@ def collect_rows(facts, gh, number: int, pr_url: str, reviewed_by: str | None, r
             outcome = "draft_with_noedition" if generated is not None and generated == final_text else "draft_with_edition"
         else:
             outcome = "draft_rejected"
-        tier = m.get("modelTier") if m.get("modelTier") in SEGMENT_TIERS else "expensive"
-        cls = m.get("diffClassification") if m.get("diffClassification") in SEGMENT_CLASSES else "internal"
+        tier, cls = m["modelTier"], m["diffClassification"]
         rows.append({
             "change_unit_id": f"{info['repo']}@{d['commit']}:{page}", "repo": info["repo"], "diff_classification": cls, "model_tier_used": tier,
             "similarity_score": _num(m.get("minChunkSimilarity")), "judge_score_precision": _num(final.get("precision")), "judge_score_recall": _num(final.get("recall")),
             "judge_score_style": _num(final.get("style")), "judge_score_quality": _num(final.get("quality")), "symbol_coverage_pct": _num(m.get("symbolCoverage")),
-            "outcome": outcome, "reviewed_by": reviewed_by, "reviewed_at": _iso(reviewed_at), "policy_version": m.get("policyVersion") or default_policy, "pr_url": pr_url,
+            "outcome": outcome, "reviewed_by": reviewed_by, "reviewed_at": _iso(reviewed_at), "policy_version": m["policyVersion"], "pr_url": pr_url,
         })
     return rows, skipped
 
