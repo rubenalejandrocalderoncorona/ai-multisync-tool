@@ -79,7 +79,7 @@ The token the cluster Job uses to clone and open PRs is `DOCS_SYNC_PAT` in the `
 
 ## 5. First run
 
-1. Run **Bootstrap Context** for `cAImanLabs/cAImanLabsCalendarScheduler` (loads the whole repo and your docs site pages into Qdrant). Check what was loaded: `node scripts/context_search.js --status`.
+1. Run **Bootstrap Context** for `cAImanLabs/cAImanLabsCalendarScheduler` (loads the whole repo and your docs site pages into Qdrant). Check what was loaded: `python -m multisync.cli.context_search --status`.
 2. Run **Sync Documentation** manually with `full = true`, or push a change. Each node prints its result, and the job summary lists the context retrieved.
 3. Merge the PR into `qa`: QA deploys. Merge the promotion PR: production deploys and the tickets close.
 

@@ -6,9 +6,8 @@
 # Secrets (create by hand, never commit):
 #   kubectl -n multirepo create secret generic multisync-webhook --from-literal=WEBHOOK_SECRET="$(openssl rand -hex 32)"
 #   multisync-secrets must contain: FACTSTORE_DATABASE_URL, AI_API_KEY, DEEPSEEK_API_KEY, DOCS_SYNC_PAT, CAIMANDESK_API_TOKEN
-# Images (imported into k3s, or pushed to a registry the cluster can pull from):
-#   multisync-webhook:local   from webhook/Dockerfile
-#   multisync-pipeline:local  from Dockerfile.pipeline
+# Image (imported into k3s, or pushed to a registry the cluster can pull from): multisync-pipeline:local, from Dockerfile.
+# The receiver and the Jobs use the same image; the receiver runs `python -m multisync.webhook`.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -73,8 +72,9 @@ spec:
       serviceAccountName: multisync-webhook-launcher
       containers:
         - name: webhook
-          image: multisync-webhook:local
+          image: __PIPELINE_IMAGE__
           imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "multisync.webhook"]
           ports: [{ containerPort: 8080 }]
           env:
             - { name: ALLOWED_REPOS, value: "cAImanLabs/cAImanLabsCalendarScheduler" }   # source repos that may trigger a sync
@@ -88,12 +88,13 @@ spec:
           readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 10 }
           livenessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 30 }
           resources:
-            requests: { cpu: 5m, memory: 8Mi }
-            limits: { memory: 48Mi }
+            requests: { cpu: 5m, memory: 24Mi }
+            limits: { memory: 96Mi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
+            runAsUser: 1000   # numeric: the image user is named, and Kubernetes cannot verify a name is non-root
             capabilities: { drop: ["ALL"] }
 ---
 apiVersion: v1

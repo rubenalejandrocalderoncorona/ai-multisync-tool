@@ -113,13 +113,12 @@ jobs:
           path: source-repo
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: '22'
+          python-version: '3.12'
 
       - name: Install pipeline dependencies
-        working-directory: .multisync
-        run: npm install --omit=dev --ignore-scripts --no-audit --no-fund
+        run: pip install --no-cache-dir -r .multisync/requirements.txt
 
       - name: Resolve changed documentation files
         id: files
@@ -149,7 +148,7 @@ jobs:
           INTERNAL_AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_API_BASE_URL: ${{ vars.AI_API_BASE_URL || 'https://api.openai.com' }}
           AI_API_PATH: ${{ vars.AI_API_PATH || '/v1/chat/completions' }}
-          # Model tiers (see pipeline/router.js): expensive = OpenAI, cheap = DeepSeek. Embeddings are always OpenAI.
+          # Model tiers (see multisync/router.py): expensive = OpenAI, cheap = DeepSeek. Embeddings are always OpenAI.
           AI_EXPENSIVE_MODEL: ${{ vars.AI_EXPENSIVE_MODEL || 'gpt-5.6-terra' }}
           AI_CHEAP_MODEL: ${{ vars.AI_CHEAP_MODEL || 'deepseek-v4-pro' }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -187,7 +186,7 @@ jobs:
           CAIMANDESK_URL: ${{ vars.CAIMANDESK_URL || 'https://tickets.caimanlabs.com.mx' }}
           CAIMANDESK_API_TOKEN: ${{ secrets.CAIMANDESK_API_TOKEN }}
           CAIMANDESK_PROJECT_ID: ${{ vars.CAIMANDESK_PROJECT_ID }}
-        run: node .multisync/scripts/run_pipeline.js
+        run: PYTHONPATH=.multisync python -m multisync.cli.run_pipeline
 
       - name: Commit published docs (auto-trust) to target branch
         run: |
@@ -233,7 +232,7 @@ jobs:
           CAIMANDESK_TRANSPORT: ${{ vars.CAIMANDESK_TRANSPORT }}
           CAIMANDESK_MCP_URL: ${{ vars.CAIMANDESK_MCP_URL }}
         run: |
-          OUT=$(node .multisync/scripts/review_ticket.js open || true)
+          OUT=$(PYTHONPATH=.multisync python -m multisync.cli.review_ticket open || true)
           echo "$OUT"
           MARKER=$(echo "$OUT" | tail -1 | jq -r '.marker // empty')
           URL=$(echo "$OUT" | tail -1 | jq -r '.url // empty')
@@ -256,4 +255,4 @@ jobs:
 
       - name: Job summary
         if: always()
-        run: node .multisync/scripts/generate-summary.js >> "$GITHUB_STEP_SUMMARY"
+        run: PYTHONPATH=.multisync python -m multisync.cli.generate_summary >> "$GITHUB_STEP_SUMMARY"

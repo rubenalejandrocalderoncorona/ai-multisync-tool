@@ -5,10 +5,10 @@ Every step below has a check. Steps 1 and 2 cost nothing and call no model.
 
 ```mermaid
 flowchart LR
-  A["1. Add the repo to<br/>config/repos.json"] --> B["2. DRY RUN<br/>onboard_check.js<br/>(no network, no cost)"]
+  A["1. Add the repo to<br/>config/repos.json"] --> B["2. DRY RUN<br/>onboard_check.py<br/>(no network, no cost)"]
   B -->|"blockers"| A
   B -->|"clean"| C["3. Load the context<br/>Bootstrap Context<br/>(embeddings into Qdrant)"]
-  C --> D["4. Verify what is loaded<br/>context_search.js --status / --query"]
+  C --> D["4. Verify what is loaded<br/>context_search.py --status / --query"]
   D --> E["5. First run for one page<br/>Sync Documentation, pages=..."]
   E --> F["6. Read the page against<br/>the source, tune scope and brief"]
   F --> G["7. Add sync-docs.yml<br/>to the repo"]
@@ -44,7 +44,7 @@ Rules of thumb that came from real runs:
 ## 2. Dry run (free)
 
 ```bash
-node scripts/onboard_check.js --repo owner/name --dir /path/to/checkout
+python -m multisync.cli.onboard_check --repo owner/name --dir /path/to/checkout
 ```
 
 It prints what would be loaded (code files and chunks, documentation files, what is excluded), an embedding cost estimate,
@@ -61,7 +61,7 @@ On CalendarScheduler it showed 507 code files (977 chunks), about 400,000 tokens
 Run **Bootstrap Context** in the central repo with the source repo and a ref, or locally:
 
 ```bash
-node scripts/bootstrap_context.js --repo owner/name --dir /path/to/checkout --full \
+python -m multisync.cli.bootstrap_context --repo owner/name --dir /path/to/checkout --full \
   --site-dir /path/to/central-repo --site-repo owner/central-repo
 ```
 
@@ -77,9 +77,9 @@ Secret-looking lines are scrubbed first. Re-running is safe: the repo's previous
 ## 4. Verify what is loaded
 
 ```bash
-node scripts/context_search.js --status
-node scripts/context_search.js --repo owner/name --query "how are polls created" --kind code
-node scripts/context_search.js --repo owner/name --gar "A paragraph the docs might contain." --kind semantic
+python -m multisync.cli.context_search --status
+python -m multisync.cli.context_search --repo owner/name --query "how are polls created" --kind code
+python -m multisync.cli.context_search --repo owner/name --gar "A paragraph the docs might contain." --kind semantic
 ```
 
 Check that the counts match the dry run and that a few real queries return the right files.
