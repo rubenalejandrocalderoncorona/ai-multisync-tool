@@ -87,6 +87,10 @@ data:
   ROUTER_FORCE: "auto"
   ROUTER_JUDGE: "expensive"
   REVIEW_ENVIRONMENT_NAME: "QA"
+  # Hosted LangGraph traces (LangSmith). Off by default: turning it on sends prompts, code excerpts and model output to a third party.
+  # To enable: set LANGSMITH_TRACING to "true" and add LANGSMITH_API_KEY to the multisync-secrets Secret (docs/OBSERVABILITY.md).
+  LANGSMITH_TRACING: "false"
+  LANGSMITH_PROJECT: "multirepo-agent-docs"
 ---
 apiVersion: apps/v1
 kind: Deployment

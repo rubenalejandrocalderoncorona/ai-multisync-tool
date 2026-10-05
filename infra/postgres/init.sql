@@ -78,3 +78,20 @@ CREATE TABLE IF NOT EXISTS doc_refs (
   PRIMARY KEY (symbol, doc_repo, doc_path)
 );
 CREATE INDEX IF NOT EXISTS doc_refs_doc_idx ON doc_refs (doc_repo, doc_path);
+
+-- Facts about a repository as a whole ("mainly written in Go", "a dashboard for git repositories"), not about one page.
+-- source: deterministic (read from manifests and file contents, no model) | llm (extracted from the README, each fact carries a quote
+-- that was verified to exist in the source). source_hash lets the model step be skipped when its input has not changed.
+CREATE TABLE IF NOT EXISTS repo_facts (
+  id          BIGSERIAL PRIMARY KEY,
+  repo        TEXT        NOT NULL,
+  category    TEXT        NOT NULL,   -- language | stack | build | ci | api | config | purpose | feature | architecture | usage
+  fact        TEXT        NOT NULL,
+  evidence    TEXT        NOT NULL,
+  source      TEXT        NOT NULL,
+  source_hash TEXT,
+  commit      TEXT,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (repo, fact)
+);
+CREATE INDEX IF NOT EXISTS repo_facts_repo_idx ON repo_facts (repo, source);

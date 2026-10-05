@@ -172,6 +172,8 @@ class FakeOpenAI:
                     elif "You are a documentation planner" in sys:
                         hits["plan"] += 1
                         content = json.dumps(PLAN)
+                    elif "extract atomic facts" in sys:
+                        content = json.dumps({"facts": []})
                     elif "You are the JUDGE" in sys:
                         hits["judge"] += 1
                         content = json.dumps(judge_result)

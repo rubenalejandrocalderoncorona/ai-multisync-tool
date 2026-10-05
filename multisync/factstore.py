@@ -114,6 +114,36 @@ class PgFactStore:
     def coupling_stats(self):
         return self._q("SELECT s.repo, count(*)::int AS symbols, count(DISTINCT s.kind)::int AS kinds FROM symbols s GROUP BY s.repo ORDER BY s.repo")
 
+    # ── central view of runs ─────────────────────────────────────────────────────
+    def list_runs(self, limit=20, repo=None):
+        """Most recent runs: {run_id, repo, started, ended, nodes, errors, usd, outcomes}."""
+        where, args = ("WHERE repo=%s", [repo]) if repo else ("", [])
+        rows = self._q(
+            "SELECT run_id, repo, min(created_at) AS started, max(created_at) AS ended, count(*)::int AS nodes, "
+            "count(*) FILTER (WHERE status='error')::int AS errors, "
+            "coalesce(sum(coalesce((note#>>'{usage,cheap,usd}')::float,0) + coalesce((note#>>'{usage,expensive,usd}')::float,0)),0) AS usd "
+            f"FROM node_logs {where} GROUP BY run_id, repo ORDER BY min(created_at) DESC LIMIT %s", args + [limit])
+        for r in rows:
+            r["outcomes"] = {o["outcome"]: o["n"] for o in self._q("SELECT outcome, count(*)::int AS n FROM decisions WHERE run_id=%s GROUP BY outcome", (r["run_id"],))}
+        return rows
+
+    def run_logs(self, run_id):
+        return self._q("SELECT repo, path, commit, node, status, ms, note, created_at FROM node_logs WHERE run_id=%s ORDER BY id", (run_id,))
+
+    # ── facts about a repository as a whole ──────────────────────────────────────
+    def replace_repo_facts(self, repo, source, rows, commit, source_hash) -> None:
+        """Replace the facts of one source (deterministic | llm) for a repo."""
+        self._q("DELETE FROM repo_facts WHERE repo=%s AND source=%s", (repo, source))
+        for r in rows:
+            self._q("INSERT INTO repo_facts (repo, category, fact, evidence, source, source_hash, commit) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (repo, fact) DO NOTHING",
+                    (repo, r["category"], r["fact"], r["evidence"], source, source_hash, commit))
+
+    def repo_facts(self, repo, source=None):
+        sql, args = "SELECT category, fact, evidence, source, source_hash, commit, updated_at FROM repo_facts WHERE repo=%s", [repo]
+        if source:
+            sql, args = sql + " AND source=%s", args + [source]
+        return self._q(sql + " ORDER BY source, category, id", args)
+
     def close(self) -> None:
         self.conn.close()
 
@@ -126,6 +156,36 @@ class MemoryFactStore:
         self.ctx: dict = {}
         self.symbols: list[dict] = []
         self.refs: list[dict] = []
+
+    def list_runs(self, limit=20, repo=None):
+        runs: dict = {}
+        for e in self.node_logs:
+            if repo and e.get("repo") != repo:
+                continue
+            r = runs.setdefault(e["runId"], {"run_id": e["runId"], "repo": e.get("repo"), "started": e.get("at"), "ended": e.get("at"), "nodes": 0, "errors": 0, "usd": 0.0, "outcomes": {}})
+            r["nodes"] += 1
+            r["errors"] += e.get("status") == "error"
+            u = (e.get("note") or {}).get("usage") or {}
+            r["usd"] += sum((u.get(t) or {}).get("usd", 0) for t in ("cheap", "expensive"))
+            r["ended"] = e.get("at")
+        for d in self.decisions:
+            if d.get("runId") in runs:
+                o = runs[d["runId"]]["outcomes"]
+                o[d["outcome"]] = o.get(d["outcome"], 0) + 1
+        return list(runs.values())[-limit:][::-1]
+
+    def run_logs(self, run_id):
+        return [{"repo": e.get("repo"), "path": e.get("path"), "commit": e.get("commit"), "node": e["node"], "status": e["status"], "ms": e["ms"], "note": e.get("note") or {},
+                 "created_at": e.get("at")} for e in self.node_logs if e.get("runId") == run_id]
+
+    def replace_repo_facts(self, repo, source, rows, commit, source_hash):
+        self.rfacts = [r for r in getattr(self, "rfacts", []) if not (r["repo"] == repo and r["source"] == source)]
+        for r in rows:
+            if not any(x["repo"] == repo and x["fact"] == r["fact"] for x in self.rfacts):
+                self.rfacts.append({"repo": repo, "category": r["category"], "fact": r["fact"], "evidence": r["evidence"], "source": source, "source_hash": source_hash, "commit": commit})
+
+    def repo_facts(self, repo, source=None):
+        return [r for r in getattr(self, "rfacts", []) if r["repo"] == repo and (not source or r["source"] == source)]
 
     def get_context_state(self, repo): return self.ctx.get(repo)
     def set_context_state(self, repo, commit, files, chunks): self.ctx[repo] = {"repo": repo, "commit": commit, "files": files, "chunks": chunks}

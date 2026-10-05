@@ -2,6 +2,8 @@
 
   python -m multisync.cli.factstore --migrate                          create or update the schema (idempotent)
   python -m multisync.cli.factstore --status                           row counts and the coupling per repo
+  python -m multisync.cli.factstore --repo-facts owner/name            the facts stored about a repository as a whole
+  python -m multisync.cli.factstore --profile --repo owner/name --dir <checkout>   (re)build those facts now
   python -m multisync.cli.factstore --symbol createPoll                where a symbol is defined and which documents mention it
   python -m multisync.cli.factstore --backfill --repo owner/name --dir <checkout> [--site-dir <docs repo> --site-repo owner/docs]
                                                                        fill symbols and doc references for a repo that is already loaded
@@ -47,6 +49,23 @@ def main(argv: list[str]) -> None:
             print(f"  {x['doc_repo']}  {x['doc_path']}  [{x['kind']}]")
         if not info["defined"] and not info["referencedBy"]:
             print("  (unknown symbol: is the repo loaded? try --backfill)")
+
+    rf = arg_value(argv, "repo-facts")
+    if rf:
+        rows = f.repo_facts(rf)
+        print(f"\nFacts about {rf} ({len(rows)}):")
+        for r in rows:
+            print(f"  [{r['category']}] {r['fact']}\n      evidence ({r['source']}): {r['evidence'][:110]}")
+        if not rows:
+            print("  (none yet: run a sync, or --profile --repo ... --dir ...)")
+
+    if "--profile" in argv:
+        repo, directory = arg_value(argv, "repo"), arg_value(argv, "dir")
+        if not repo or not directory:
+            raise SystemExit("usage: --profile --repo owner/name --dir <checkout>")
+        from ..repofacts import profile_repo
+
+        print(profile_repo(repo, arg_value(argv, "ref") or G.head(directory), G.accessors(directory), f, d["llm"]))
 
     if "--backfill" in argv:
         repo, directory = arg_value(argv, "repo"), arg_value(argv, "dir")
