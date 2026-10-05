@@ -19,6 +19,7 @@ flowchart LR
 | `push` | repo is in `ALLOWED_REPOS`, branch is the default branch | `sync` | pipeline, PR into `qa`, ticket |
 | `repository_dispatch` | repo is in `ALLOWED_REPOS` (`client_payload`: repository, sha, before, target_branch, changed_files) | `sync` | same |
 | `pull_request` closed | central repo, merged, head `docs-sync/*`, base `qa` | `index` | approved pages embedded into Qdrant |
+| `workflow_run` completed | central repo, workflow "Documentation site", success, event push, branch `qa` or `main` | `deploy` | the docs site image `ghcr.io/<central>:<env>-<sha12>` is rolled out to `docs-qa` / `docs-prod` |
 | `ping` | any signed | none | `pong` |
 
 Anything unsigned or with a wrong signature gets `401`; a signed event that does not qualify gets `200 ignored: <why>`. All payload fields are
@@ -44,7 +45,7 @@ Add `DOCS_SYNC_PAT` (classic PAT, `repo` + `workflow`) to `multisync-secrets`:
 Read the shared secret once: `ssh vps "sudo -n kubectl -n multirepo get secret multisync-webhook -o jsonpath='{.data.WEBHOOK_SECRET}' | base64 -d"`.
 Then add a webhook (Settings, Webhooks) with payload URL `https://rubenalejandrocalderoncorona.org/api/sync-webhook`, content type `application/json`, that secret:
 - on each source repo (for example `cAImanLabs/cAImanLabsCalendarScheduler`): event **Pushes**;
-- on `rubenalejandrocalderoncorona/multirepo-agent-docs`: event **Pull requests**.
+- on `rubenalejandrocalderoncorona/multirepo-agent-docs`: events **Pull requests** and **Workflow runs**.
 
 Add further source repos to `ALLOWED_REPOS` in `infra/k8s/webhook.yaml`.
 
@@ -59,4 +60,4 @@ ssh vps 'sudo -n kubectl -n multirepo get jobs; sudo -n kubectl -n multirepo log
 ## What moved off the runner
 - `sync-docs-central.yml` is now a manual fallback (it cannot reach the cluster from GitHub-hosted runners).
 - The `index` job of `sync-docs-approved.yml` is replaced by the `index` Job; the ticket and promotion jobs need only HTTPS and stay on GitHub-hosted runners.
-- `docs-site.yml` deploy (`kubectl set image`) needed the runner and `DEPLOY_ENABLED` was never turned on; the sites were deployed from locally imported images. Redeploying them needs a new mechanism (for example a deploy Job, or an SSH step like `deploy-cluster.yml`).
+- `docs-site.yml` no longer deploys: GitHub builds and pushes the image, then its `workflow_run` webhook starts a `deploy` Job (`multisync/cli/deploy_site.py`) under the `multisync-docs-deployer` service account, which can patch only `docs-qa` and `docs-prod`. No SSH key to the VPS exists anywhere. The cluster pulls the private GHCR image with the `ghcr-pull` secret.

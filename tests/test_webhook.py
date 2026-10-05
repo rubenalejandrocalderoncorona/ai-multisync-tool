@@ -103,3 +103,29 @@ def test_http_unsigned_and_badly_signed_are_rejected_a_valid_push_starts_one_job
         urllib.request.urlopen(url, timeout=5)
     except urllib.error.HTTPError as e:
         assert e.code == 405
+
+
+# ── docs-site deploy ─────────────────────────────────────────────────────────
+RUN = {"action": "completed", "repository": {"full_name": "me/docs"},
+       "workflow_run": {"name": "Documentation site", "conclusion": "success", "event": "push", "head_branch": "qa", "head_sha": "a" * 40}}
+
+
+def test_plan_deploy_only_for_successful_push_runs_of_the_docs_workflow_on_qa_or_main():
+    j, why = plan(cfg(), "workflow_run", RUN)
+    assert j and j["mode"] == "deploy" and j["deploy_env"] == "qa" and j["image"] == "ghcr.io/me/docs:qa-" + "a" * 12, why
+    j, _ = plan(cfg(), "workflow_run", {**RUN, "workflow_run": {**RUN["workflow_run"], "head_branch": "main"}})
+    assert j["deploy_env"] == "prod" and j["image"].endswith(":prod-" + "a" * 12)
+    for label, run in {"failed": {"conclusion": "failure"}, "other workflow": {"name": "CI"}, "pr run": {"event": "pull_request"}, "other branch": {"head_branch": "dev"},
+                       "short sha": {"head_sha": "abc"}}.items():
+        assert plan(cfg(), "workflow_run", {**RUN, "workflow_run": {**RUN["workflow_run"], **run}})[0] is None, label
+    assert plan(cfg(), "workflow_run", {**RUN, "repository": {"full_name": "evil/x"}})[0] is None
+
+
+def test_deploy_manifest_runs_under_the_deployer_service_account_without_secrets():
+    j, _ = plan(cfg(), "workflow_run", RUN)
+    m = job_manifest(cfg(), j, now=1700000000)
+    spec = m["spec"]["template"]["spec"]
+    assert m["metadata"]["name"].startswith("multisync-deploy-aaaaaaa-")
+    assert spec["serviceAccountName"] == "multisync-docs-deployer"
+    assert "envFrom" not in spec["containers"][0], "the deploy Job gets no secrets"
+    assert spec["containers"][0]["command"] == ["python", "-m", "multisync.cli.deploy_site"]
