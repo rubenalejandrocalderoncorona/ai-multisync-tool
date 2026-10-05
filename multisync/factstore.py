@@ -130,6 +130,33 @@ class PgFactStore:
     def run_logs(self, run_id):
         return self._q("SELECT repo, path, commit, node, status, ms, note, created_at FROM node_logs WHERE run_id=%s ORDER BY id", (run_id,))
 
+    # ── review outcomes (logging only) ───────────────────────────────────────────
+    def find_decision(self, repo, commit_prefix, path):
+        """The most recent pending_review decision for a page of a source commit (a replayed sync leaves several; the last one is on the PR)."""
+        rows = self._q("SELECT run_id, repo, path, commit, metrics, attempts FROM decisions WHERE repo=%s AND path=%s AND commit LIKE %s AND outcome='pending_review' "
+                       "ORDER BY id DESC LIMIT 1", (repo, path, commit_prefix + "%"))
+        return rows[0] if rows else None
+
+    def record_review_outcome(self, r) -> bool:
+        """Insert one row; False when this (pr_url, change_unit_id) was already recorded."""
+        rows = self._q(
+            "INSERT INTO review_outcomes (change_unit_id, repo, diff_classification, model_tier_used, similarity_score, judge_score_precision, judge_score_recall, "
+            "judge_score_style, judge_score_quality, symbol_coverage_pct, outcome, reviewed_by, reviewed_at, policy_version, auto_approval_eligible, pr_url) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s) ON CONFLICT (pr_url, change_unit_id) DO NOTHING RETURNING id",
+            (r["change_unit_id"], r["repo"], r["diff_classification"], r["model_tier_used"], r.get("similarity_score"), r.get("judge_score_precision"),
+             r.get("judge_score_recall"), r.get("judge_score_style"), r.get("judge_score_quality"), r.get("symbol_coverage_pct"), r["outcome"],
+             r.get("reviewed_by"), r.get("reviewed_at"), r["policy_version"], r["pr_url"]))
+        return bool(rows)
+
+    def review_outcome_counts(self, diff_classification, model_tier, policy_version=None) -> dict:
+        sql = ("SELECT count(*)::int AS n, count(*) FILTER (WHERE outcome='draft_with_noedition')::int AS noedition, "
+               "count(*) FILTER (WHERE outcome='draft_with_edition')::int AS edition, count(*) FILTER (WHERE outcome='draft_rejected')::int AS rejected "
+               "FROM review_outcomes WHERE diff_classification=%s AND model_tier_used=%s")
+        args = [diff_classification, model_tier]
+        if policy_version:
+            sql, args = sql + " AND policy_version=%s", args + [policy_version]
+        return self._q(sql, args)[0]
+
     # ── facts about a repository as a whole ──────────────────────────────────────
     def replace_repo_facts(self, repo, source, rows, commit) -> None:
         """Replace all facts of one source (deterministic | llm) for a repo."""
@@ -193,6 +220,25 @@ class MemoryFactStore:
     def run_logs(self, run_id):
         return [{"repo": e.get("repo"), "path": e.get("path"), "commit": e.get("commit"), "node": e["node"], "status": e["status"], "ms": e["ms"], "note": e.get("note") or {},
                  "created_at": e.get("at")} for e in self.node_logs if e.get("runId") == run_id]
+
+    def find_decision(self, repo, commit_prefix, path):
+        for d in reversed(self.decisions):
+            if d.get("repo") == repo and d.get("path") == path and str(d.get("commit", "")).startswith(commit_prefix) and d.get("outcome") == "pending_review":
+                return {"run_id": d.get("runId"), "repo": repo, "path": path, "commit": d["commit"], "metrics": d.get("metrics") or {}, "attempts": d.get("attempts") or []}
+        return None
+
+    def record_review_outcome(self, r):
+        self.review_outcomes = getattr(self, "review_outcomes", [])
+        if any(x["pr_url"] == r["pr_url"] and x["change_unit_id"] == r["change_unit_id"] for x in self.review_outcomes):
+            return False
+        self.review_outcomes.append({**r, "auto_approval_eligible": False})
+        return True
+
+    def review_outcome_counts(self, diff_classification, model_tier, policy_version=None):
+        rows = [x for x in getattr(self, "review_outcomes", []) if x["diff_classification"] == diff_classification and x["model_tier_used"] == model_tier
+                and (not policy_version or x["policy_version"] == policy_version)]
+        return {"n": len(rows), "noedition": sum(x["outcome"] == "draft_with_noedition" for x in rows), "edition": sum(x["outcome"] == "draft_with_edition" for x in rows),
+                "rejected": sum(x["outcome"] == "draft_rejected" for x in rows)}
 
     def replace_repo_facts(self, repo, source, rows, commit):
         self.rfacts = [r for r in getattr(self, "rfacts", []) if not (r["repo"] == repo and r["source"] == source)]

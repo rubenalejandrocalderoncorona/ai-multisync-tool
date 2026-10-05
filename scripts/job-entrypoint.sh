@@ -2,7 +2,8 @@
 # Entry point of the ephemeral Kubernetes Job (the same steps as .github/workflows/sync-docs-central.yml and the `index` job of
 # sync-docs-approved.yml, without a standing runner). Configuration arrives as environment variables:
 #   JOB_MODE=sync   SOURCE_REPO SOURCE_SHA SOURCE_BEFORE TARGET_BRANCH CHANGED_FILES CENTRAL_REPO
-#   JOB_MODE=index  CENTRAL_REPO BASE_SHA MERGE_SHA
+#   JOB_MODE=index  CENTRAL_REPO BASE_SHA MERGE_SHA  (+ PR_NUMBER PR_URL PR_MERGED REVIEWED_BY REVIEWED_AT: logs the review outcome)
+#   JOB_MODE=review CENTRAL_REPO PR_NUMBER PR_URL PR_MERGED REVIEWED_BY REVIEWED_AT   (a review PR closed without merging: only logs the outcome)
 # Secrets: DOCS_SYNC_PAT, AI_API_KEY, DEEPSEEK_API_KEY, FACTSTORE_DATABASE_URL, CAIMANDESK_API_TOKEN. Untrusted values are only ever
 # read through variables, never interpolated into code.
 set -euo pipefail
@@ -56,6 +57,14 @@ if [ "$MODE" = "index" ]; then
     python -m multisync.cli.index_approved --delete "${GONE[@]}"
   fi
   echo "indexed ${#CHANGED[@]} page(s), removed ${#REMOVED[@]}"
+  # Logging only: what the reviewer did with the draft. Never fails the job and never touches the approval above.
+  if [ -n "${PR_NUMBER:-}" ]; then step "record the review outcome"; python -m multisync.cli.record_review || true; fi
+  exit 0
+fi
+
+if [ "$MODE" = "review" ]; then
+  step "record the review outcome of $CENTRAL_REPO#${PR_NUMBER:-?} (closed without merging)"
+  python -m multisync.cli.record_review || true
   exit 0
 fi
 

@@ -144,6 +144,17 @@ def load_config(env: Mapping[str, str] | None = None) -> AttrDict:
     return attrs(cfg)
 
 
+def policy_version(cfg) -> str:
+    """Identifies the review/generation policy a draft was produced under: the thresholds, the router and judge settings and the model names.
+    Review outcomes are only comparable within one policy version, so it is stored with every outcome."""
+    import hashlib
+    import json as _json
+
+    blob = _json.dumps({"t": dict(cfg["thresholds"]), "judge": cfg["ai"]["judgeTier"], "force": cfg["ai"]["routerForce"],
+                        "models": {k: v["model"] for k, v in cfg["ai"]["tiers"].items()}}, sort_keys=True, default=str)
+    return "v1-" + hashlib.sha256(blob.encode()).hexdigest()[:8]
+
+
 def repo_policy(repos_config: Mapping[str, Any], repo_full_name: str) -> AttrDict:
     """Per-repo policy: trust level (auto|review), docs folder, style guide and glossary.
 

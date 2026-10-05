@@ -17,12 +17,10 @@ from .symbols import diff_public_symbols
 
 
 def route_change(change: dict, registry: dict | None = None, facts=None, force: str = "auto") -> dict:
-    """{tier: 'cheap'|'expensive', reasons, signals}"""
+    """{tier: 'cheap'|'expensive', reasons, signals, classification: 'internal'|'public_interface'}"""
     registry = registry or {}
     signals = {"publicChanged": [], "total": 0, "registry": [], "referencedBy": 0}
     reasons: list[str] = []
-    if force in ("cheap", "expensive"):
-        return {"tier": force, "reasons": [f"forced by ROUTER_FORCE={force}"], "signals": signals}
 
     is_code = change.get("kind") == "code"
     after = change.get("after") or ""
@@ -59,6 +57,11 @@ def route_change(change: dict, registry: dict | None = None, facts=None, force: 
                 syms = list(dict.fromkeys(r["symbol"] for r in refs))[:4]
                 reasons.append(f"referenced by {signals['referencedBy']} document(s) elsewhere: {', '.join(syms)}")
 
+    # What kind of change this is, whatever model ends up being used: the segment the review outcomes are grouped by.
+    classification = "public_interface" if reasons else "internal"
+    if force in ("cheap", "expensive"):
+        return {"tier": force, "reasons": [f"forced by ROUTER_FORCE={force}"], "signals": signals, "classification": classification}
     if reasons:
-        return {"tier": "expensive", "reasons": reasons, "signals": signals}
-    return {"tier": "cheap", "reasons": ["internals only: no public interface changed" if is_code else "documentation restructure with no cross-repo contract"], "signals": signals}
+        return {"tier": "expensive", "reasons": reasons, "signals": signals, "classification": classification}
+    return {"tier": "cheap", "reasons": ["internals only: no public interface changed" if is_code else "documentation restructure with no cross-repo contract"],
+            "signals": signals, "classification": classification}
