@@ -31,7 +31,12 @@ def judge(llm, *, mode="docs", source="", draft="", known_facts=None, style_text
                 f"DRAFT:\n{draft}\n\nKNOWN_FACTS:\n{kf}\n\nSTYLE:\n{style_text or '(none)'}")
     else:
         user = f"SOURCE:\n{source}\n\nDRAFT:\n{draft}\n\nKNOWN_FACTS:\n{kf}\n\nSTYLE:\n{style_text or '(none)'}"
-    r = llm.chat_json([{"role": "system", "content": prompt["text"]}, {"role": "user", "content": user}], tier=tier)
+    messages = [{"role": "system", "content": prompt["text"]}, {"role": "user", "content": user}]
+    try:
+        r = llm.chat_json(messages, tier=tier)
+    except ValueError:
+        # A reply that is not valid JSON must not lose the whole page: ask once more, as the planning stages do.
+        r = llm.chat_json([*messages, {"role": "user", "content": "Your previous reply was not valid JSON. Reply again with ONLY the JSON object."}], tier=tier)
     claims = r.get("claims") if isinstance(r.get("claims"), list) else []
     facts = r.get("facts") if isinstance(r.get("facts"), list) else []
     supported = sum(1 for c in claims if c.get("supported"))

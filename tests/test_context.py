@@ -586,3 +586,41 @@ def test_graph_when_the_page_names_every_declared_model_verification_and_coverag
     d = process_change(unit(after=MODELS, before=None, **SCHEMA), make_deps(llm=llm))
     assert d["outcome"] == "pending_review"
     assert next(t for t in d["trail"] if t["node"] == "judge")["note"]["coverage"]["prisma_model"] == "10/10"
+
+
+# ── regressions found by the first flare-optimizer-v2 run ────────────────────
+def test_judge_retries_once_when_the_reply_is_not_valid_json_and_a_second_failure_still_raises():
+    seen = {"n": 0}
+
+    class Flaky:
+        def chat_json(self, m, **kw):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                raise ValueError("Expecting ',' delimiter")
+            assert "not valid JSON" in m[-1]["content"]
+            return PASS_JUDGE
+
+    assert judge(Flaky(), mode="code", source="s", draft="d")["precision"] == 1
+    assert seen["n"] == 2
+
+    class Broken:
+        def chat_json(self, m, **kw):
+            raise ValueError("bad")
+
+    with pytest.raises(ValueError):
+        judge(Broken(), mode="code", source="s", draft="d")
+
+
+API_SRC = ('### FILE: app/main.py\n@app.post("/start-training/")\ndef handle_train_request(): pass\n@app.post("/start-evaluation/")\ndef handle_eval_request(): pass\n'
+           'def setup_logging(): pass\ndef debug_message(): pass\nclass Settings: pass\nx = os.environ["APPLICATION_NAME"]\n')
+
+
+def test_a_new_page_must_name_its_routes_not_every_helper_function_and_environment_variable():
+    draft = ("## Overview\n\nThe service starts a training run with POST /start-training/ and an evaluation run with POST /start-evaluation/, each with a JSON body.\n\n"
+             "## Usage\n\nCall the training route first, then the evaluation route once the model is stored.\n")
+    llm = fake_llm([PASS_JUDGE], draft=draft)
+    d = process_change({"kind": "code", "repo": "o/r", "filePath": "api.md", "commit": "abc1234", "before": None, "after": API_SRC, "existing": "", "changedFiles": ["app/main.py"],
+                        "styleKey": "API documentation"}, make_deps(llm=llm))
+    v = next(t for t in d["trail"] if t["node"] == "verify_draft")["note"]
+    assert v["ok"] is True and v["mentioned"] == "2/2", v
+    assert d["outcome"] == "pending_review"
