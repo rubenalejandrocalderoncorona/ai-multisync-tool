@@ -38,14 +38,29 @@ No code change is needed: the Jobs read these variables through the same `envFro
 
 # Facts about a repository
 
-`multisync.repo_facts` holds what is known about each repository as a whole: the main language and mix, the stack and frameworks, entry
-points, build targets, CI workflows, the HTTP routes and environment variables found in the code (all read from the repository with no model),
-and what the project is and does (extracted from the README by the cheap model, each fact with a verbatim quote that is checked against the
-source; a fact whose quote is not found is dropped). The model step runs only when the README or manifests changed.
+`multisync.repo_facts` holds what is known about each repository as a whole, with provenance:
+
+| Column | Meaning |
+|---|---|
+| `source_path` | the file the fact came from (`README.md`, `go.mod`, `Makefile`), or an aggregate: `@source-files`, `@workflows`, `@entrypoints` |
+| `source_hash` | sha256 of that source when the fact was extracted (empty = unknown, counts as stale) |
+| `extracted_at` | when |
+| `verification_method` | `deterministic` (read from the repo, no model) or `llm_quote_grounded` (model output whose verbatim quote was found in the source; otherwise dropped) |
+| `flag`, `flag_detail` | `contradicts_deterministic_source` when a README fact disagrees with a deterministic one |
+
+**Staleness is checked wherever the facts are read** for the planner and the judge (`checked_repo_facts`): each fact's source is hashed again and
+compared with `source_hash`; a file read and a hash, no model. Stale facts are **rebuilt inline** before use: the deterministic ones are
+re-parsed (near free), and only a README whose content changed is sent to the cheap model again (only that README, not the whole source).
+Without a model, stale README facts are left out rather than trusted. The result is logged in the `gar` node's note (`repoFacts`: facts,
+stale, rebuilt, conflicts, excluded).
+
+**Cross-check.** README facts are compared with deterministic ones where a category overlaps: the Go version against `go.mod`, "mainly written
+in X" against the measured language mix, and framework major versions against `package.json`. A contradiction is flagged, and reaches the planner
+as `CONFLICT, do not state: "..."` and the judge as a `CONFLICT:` line saying the deterministic value is true. Example from SuperGit: the README
+says "Go 1.22+", `go.mod` declares Go 1.24.2.
 
 ```bash
-python -m multisync.cli.factstore --repo-facts owner/name
-python -m multisync.cli.factstore --profile --repo owner/name --dir <checkout>      # rebuild now
+python -m multisync.cli.factstore --repo-facts owner/name       # facts with their source, hash, time and flags
+python -m multisync.cli.factstore --profile --repo owner/name --dir <checkout>
 ```
-The planner receives these facts as `REPO_FACTS`, and the judge treats them as known facts, so a page can say "mainly written in Go" without
-being flagged as unsupported. The page-level `claims` table is a different thing: claims are what a generated page asserts.
+The page-level `claims` table is a different thing: claims are what a generated page asserts.

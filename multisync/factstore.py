@@ -131,15 +131,31 @@ class PgFactStore:
         return self._q("SELECT repo, path, commit, node, status, ms, note, created_at FROM node_logs WHERE run_id=%s ORDER BY id", (run_id,))
 
     # ── facts about a repository as a whole ──────────────────────────────────────
-    def replace_repo_facts(self, repo, source, rows, commit, source_hash) -> None:
-        """Replace the facts of one source (deterministic | llm) for a repo."""
+    def replace_repo_facts(self, repo, source, rows, commit) -> None:
+        """Replace all facts of one source (deterministic | llm) for a repo."""
         self._q("DELETE FROM repo_facts WHERE repo=%s AND source=%s", (repo, source))
+        self.add_repo_facts(repo, rows, commit)
+
+    def delete_repo_facts(self, repo, source, source_paths=None) -> None:
+        if source_paths is None:
+            self._q("DELETE FROM repo_facts WHERE repo=%s AND source=%s", (repo, source))
+        else:
+            self._q("DELETE FROM repo_facts WHERE repo=%s AND source=%s AND source_path = ANY(%s)", (repo, source, list(source_paths)))
+
+    def add_repo_facts(self, repo, rows, commit) -> None:
         for r in rows:
-            self._q("INSERT INTO repo_facts (repo, category, fact, evidence, source, source_hash, commit) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (repo, fact) DO NOTHING",
-                    (repo, r["category"], r["fact"], r["evidence"], source, source_hash, commit))
+            self._q("INSERT INTO repo_facts (repo, category, fact, evidence, source, source_path, source_hash, extracted_at, verification_method, flag, flag_detail, commit) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (repo, fact) DO NOTHING",
+                    (repo, r["category"], r["fact"], r["evidence"], r["source"], r.get("source_path", ""), r.get("source_hash", ""), r.get("extracted_at") or "now",
+                     r.get("verification_method", "deterministic"), r.get("flag"), r.get("flag_detail"), commit))
+
+    def set_repo_fact_flags(self, repo, rows) -> None:
+        for r in rows:
+            self._q("UPDATE repo_facts SET flag=%s, flag_detail=%s WHERE repo=%s AND fact=%s", (r.get("flag"), r.get("flag_detail"), repo, r["fact"]))
 
     def repo_facts(self, repo, source=None):
-        sql, args = "SELECT category, fact, evidence, source, source_hash, commit, updated_at FROM repo_facts WHERE repo=%s", [repo]
+        sql, args = ("SELECT category, fact, evidence, source, source_path, source_hash, extracted_at, verification_method, flag, flag_detail, commit "
+                     "FROM repo_facts WHERE repo=%s"), [repo]
         if source:
             sql, args = sql + " AND source=%s", args + [source]
         return self._q(sql + " ORDER BY source, category, id", args)
@@ -178,14 +194,27 @@ class MemoryFactStore:
         return [{"repo": e.get("repo"), "path": e.get("path"), "commit": e.get("commit"), "node": e["node"], "status": e["status"], "ms": e["ms"], "note": e.get("note") or {},
                  "created_at": e.get("at")} for e in self.node_logs if e.get("runId") == run_id]
 
-    def replace_repo_facts(self, repo, source, rows, commit, source_hash):
+    def replace_repo_facts(self, repo, source, rows, commit):
         self.rfacts = [r for r in getattr(self, "rfacts", []) if not (r["repo"] == repo and r["source"] == source)]
+        self.add_repo_facts(repo, rows, commit)
+
+    def delete_repo_facts(self, repo, source, source_paths=None):
+        self.rfacts = [r for r in getattr(self, "rfacts", []) if not (r["repo"] == repo and r["source"] == source and (source_paths is None or r.get("source_path") in source_paths))]
+
+    def add_repo_facts(self, repo, rows, commit):
+        self.rfacts = getattr(self, "rfacts", [])
         for r in rows:
             if not any(x["repo"] == repo and x["fact"] == r["fact"] for x in self.rfacts):
-                self.rfacts.append({"repo": repo, "category": r["category"], "fact": r["fact"], "evidence": r["evidence"], "source": source, "source_hash": source_hash, "commit": commit})
+                self.rfacts.append({"repo": repo, "flag": None, "flag_detail": None, "source_path": "", "source_hash": "", "extracted_at": None, "verification_method": "deterministic", **r, "commit": commit})
+
+    def set_repo_fact_flags(self, repo, rows):
+        for r in rows:
+            for x in getattr(self, "rfacts", []):
+                if x["repo"] == repo and x["fact"] == r["fact"]:
+                    x["flag"], x["flag_detail"] = r.get("flag"), r.get("flag_detail")
 
     def repo_facts(self, repo, source=None):
-        return [r for r in getattr(self, "rfacts", []) if r["repo"] == repo and (not source or r["source"] == source)]
+        return [dict(r) for r in getattr(self, "rfacts", []) if r["repo"] == repo and (not source or r["source"] == source)]
 
     def get_context_state(self, repo): return self.ctx.get(repo)
     def set_context_state(self, repo, commit, files, chunks): self.ctx[repo] = {"repo": repo, "commit": commit, "files": files, "chunks": chunks}

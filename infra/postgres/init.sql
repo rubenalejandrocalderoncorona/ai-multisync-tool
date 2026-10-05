@@ -80,18 +80,39 @@ CREATE TABLE IF NOT EXISTS doc_refs (
 CREATE INDEX IF NOT EXISTS doc_refs_doc_idx ON doc_refs (doc_repo, doc_path);
 
 -- Facts about a repository as a whole ("mainly written in Go", "a dashboard for git repositories"), not about one page.
--- source: deterministic (read from manifests and file contents, no model) | llm (extracted from the README, each fact carries a quote
--- that was verified to exist in the source). source_hash lets the model step be skipped when its input has not changed.
+-- Every fact records what it was extracted from and when, so staleness can be detected by hashing the source again:
+--   source_path          the file it came from ('README.md', 'go.mod', 'Makefile') or an aggregate: '@source-files', '@workflows', '@entrypoints'
+--   source_hash          sha256 of that source's content at extraction time ('' = unknown, treated as stale)
+--   extracted_at         when
+--   verification_method   deterministic (read from the repo, no model) | llm_quote_grounded (model output whose verbatim quote was found in the source)
+--   flag / flag_detail    contradicts_deterministic_source when a README-derived fact disagrees with a deterministic one
 CREATE TABLE IF NOT EXISTS repo_facts (
-  id          BIGSERIAL PRIMARY KEY,
-  repo        TEXT        NOT NULL,
-  category    TEXT        NOT NULL,   -- language | stack | build | ci | api | config | purpose | feature | architecture | usage
-  fact        TEXT        NOT NULL,
-  evidence    TEXT        NOT NULL,
-  source      TEXT        NOT NULL,
-  source_hash TEXT,
-  commit      TEXT,
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  id                   BIGSERIAL PRIMARY KEY,
+  repo                 TEXT        NOT NULL,
+  category             TEXT        NOT NULL,   -- language | stack | build | ci | api | config | purpose | feature | architecture | usage
+  fact                 TEXT        NOT NULL,
+  evidence             TEXT        NOT NULL,
+  source               TEXT        NOT NULL,   -- deterministic | llm
+  source_path          TEXT        NOT NULL DEFAULT '',
+  source_hash          TEXT        NOT NULL DEFAULT '',
+  extracted_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  verification_method  TEXT        NOT NULL DEFAULT 'deterministic' CHECK (verification_method IN ('deterministic','llm_quote_grounded')),
+  flag                 TEXT,
+  flag_detail          TEXT,
+  commit               TEXT,
   UNIQUE (repo, fact)
 );
+-- Upgrade path for databases that have the first version of this table.
+ALTER TABLE repo_facts ADD COLUMN IF NOT EXISTS source_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE repo_facts ADD COLUMN IF NOT EXISTS extracted_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE repo_facts ADD COLUMN IF NOT EXISTS verification_method TEXT NOT NULL DEFAULT 'deterministic';
+ALTER TABLE repo_facts ADD COLUMN IF NOT EXISTS flag TEXT;
+ALTER TABLE repo_facts ADD COLUMN IF NOT EXISTS flag_detail TEXT;
+UPDATE repo_facts SET source_hash = '' WHERE source_hash IS NULL;
+ALTER TABLE repo_facts ALTER COLUMN source_hash SET DEFAULT '';
+ALTER TABLE repo_facts ALTER COLUMN source_hash SET NOT NULL;
+UPDATE repo_facts SET verification_method = 'llm_quote_grounded' WHERE source = 'llm' AND verification_method = 'deterministic';
+DO $$ BEGIN
+  ALTER TABLE repo_facts ADD CONSTRAINT repo_facts_verification_method_chk CHECK (verification_method IN ('deterministic','llm_quote_grounded'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE INDEX IF NOT EXISTS repo_facts_repo_idx ON repo_facts (repo, source);

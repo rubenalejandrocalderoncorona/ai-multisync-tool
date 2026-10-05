@@ -35,7 +35,7 @@ from .critic import evaluate, judge as run_judge
 from .prefilter import prefilter
 from .registry import cross_repo_check
 from .router import route_change
-from .repofacts import facts_text
+from .repofacts import checked_repo_facts, facts_text, known_fact_lines
 from .stages import analyze_code, plan_docs, plan_text, sheet_text
 from .symbols import public_symbols
 from .util import iso_now
@@ -75,6 +75,7 @@ class State(TypedDict, total=False):
     garQueries: list
     relatedCode: str
     factSheet: Any
+    repoFacts: Any
     plan: Any
     decision: Any
 
@@ -84,7 +85,7 @@ def initial_state(change: dict) -> State:
         "change": change, "trail": [], "attempts": [], "metrics": {}, "ctx": {}, "forced": None, "hypothetical": None, "templatePath": None,
         "knownFacts": None, "styleText": None, "iter": 0, "widened": False, "polished": False, "feedback": [], "draft": None, "verdict": None,
         "failure": None, "accepted": None, "tier": "expensive", "routeInfo": None, "escalated": False, "escalatePending": False,
-        "verifyFailed": False, "garQueries": [], "relatedCode": "", "factSheet": None, "plan": None, "decision": None,
+        "verifyFailed": False, "garQueries": [], "relatedCode": "", "factSheet": None, "repoFacts": [], "plan": None, "decision": None,
     }
 
 
@@ -285,7 +286,7 @@ def process_change(change: dict, deps) -> dict:
             template = open(s["templatePath"], encoding="utf-8").read()
         else:
             template = ""
-        repo_facts = facts_text(facts.repo_facts(change["repo"])) if hasattr(facts, "repo_facts") else ""
+        repo_facts = facts_text(s.get("repoFacts") or [])
         res = plan_docs(llm, sheet=s["factSheet"], brief=change.get("brief"), style_text=style_txt, existing=change.get("existing"), related=related, template=template,
                         tier=s["tier"], repo_facts=repo_facts)
         plan = res["plan"]
@@ -308,13 +309,20 @@ def process_change(change: dict, deps) -> dict:
         template_path = None if mode == "code" else W.select_template(llm, file_path=change["filePath"], content=change["after"],
                                                                       template_files=deps.get("templateFiles") or [], default_template=deps.get("defaultTemplate"))
         known_facts = facts.approved_claims(change["repo"], change["filePath"])
+        # Facts about the whole repository: each source is hashed again here, stale facts are rebuilt inline, and a README fact that contradicts
+        # a deterministic one reaches the planner and the judge as an explicit CONFLICT.
+        repo_rows, fact_report = [], None
         if hasattr(facts, "repo_facts"):
-            known_facts = [*known_facts, *[r["fact"] for r in facts.repo_facts(change["repo"])]]  # the judge may rely on verified repo facts
+            if deps.get("repoGit") is not None:
+                repo_rows, fact_report = checked_repo_facts(facts, change["repo"], change["commit"], deps["repoGit"], llm)
+            else:
+                repo_rows = facts.repo_facts(change["repo"])
+            known_facts = [*known_facts, *known_fact_lines(repo_rows)]
         return {
             "note": {"template": os.path.basename(template_path) if template_path else f"outline:{style['key'] or 'none'}", "knownFacts": len(known_facts), "style": style["key"],
                      "styleFallback": style.get("fallback"), "reusedHypothetical": bool(s.get("hypothetical")), "garParagraphs": len(gar["paragraphs"]),
-                     **({"garError": gar["error"]} if gar.get("error") else {})},
-            "update": {"hypothetical": hypothetical, "garQueries": gar["paragraphs"], "templatePath": template_path, "knownFacts": known_facts, "styleText": style_txt},
+                     **({"garError": gar["error"]} if gar.get("error") else {}), **({"repoFacts": fact_report} if fact_report else {})},
+            "update": {"hypothetical": hypothetical, "garQueries": gar["paragraphs"], "templatePath": template_path, "knownFacts": known_facts, "styleText": style_txt, "repoFacts": repo_rows},
         }
 
     def n_write_draft(s):

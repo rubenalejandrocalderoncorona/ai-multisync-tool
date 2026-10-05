@@ -55,7 +55,8 @@ def main(argv: list[str]) -> None:
         rows = f.repo_facts(rf)
         print(f"\nFacts about {rf} ({len(rows)}):")
         for r in rows:
-            print(f"  [{r['category']}] {r['fact']}\n      evidence ({r['source']}): {r['evidence'][:110]}")
+            flag = f"  !! {r['flag']}: {r['flag_detail']}" if r.get("flag") else ""
+            print(f"  [{r['category']}] {r['fact']}{flag}\n      {r['verification_method']} from {r['source_path'] or '?'} (sha256 {str(r['source_hash'])[:10] or 'none'}, {str(r['extracted_at'])[:19]}): {r['evidence'][:90]!r}")
         if not rows:
             print("  (none yet: run a sync, or --profile --repo ... --dir ...)")
 

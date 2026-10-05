@@ -153,7 +153,7 @@ def main() -> None:
             decision = process_change(change, {
                 "styles": styles, "cfg": cfg, "llm": d["llm"], "vectors": d["vectors"], "codeVectors": d["codeVectors"], "facts": d["facts"], "registry": d["registry"],
                 "policy": policy, "instructions": instructions, "templateFiles": template_files, "defaultTemplate": default_template, "runId": run_id,
-                "githubHost": env.get("GIT_HOST"), "logger": logger, "escalate": escalate_fn, "siteRepo": site_repo or None,
+                "githubHost": env.get("GIT_HOST"), "repoGit": G.accessors(source_dir), "logger": logger, "escalate": escalate_fn, "siteRepo": site_repo or None,
             })
         except Exception as e:  # noqa: BLE001 - infrastructure failure (AI/Qdrant/Postgres down): fail safe, never publish
             decision = {"runId": run_id, "repo": repo, "path": file, "commit": commit, "outcome": "fallback", "reviewerAction": "auto_rejected",

@@ -57,8 +57,9 @@ def _tier_of(tier=None, fast=False) -> str:
 class FakeLLM:
     """Scripted LLM. `judges` is a queue of judge results; the last one repeats. Records every call so tests can assert on cost."""
 
-    def __init__(self, judges=None, draft=GOOD_DRAFT):
+    def __init__(self, judges=None, draft=GOOD_DRAFT, repo_facts=None):
         self.judges = judges or []
+        self.repo_facts = repo_facts or []
         self.draft = draft
         self._j = 0
         self.calls = {"chat": 0, "judge": 0, "embed": 0, "analyze": 0, "plan": 0, "drafts": [], "analyzeInputs": [], "planInputs": [], "log": [], "garFacts": 0}
@@ -102,9 +103,13 @@ class FakeLLM:
             kind = "analyze"
         elif "documentation planner" in sys:
             kind = "plan"
+        elif "extract atomic facts" in sys:
+            kind = "repo-facts"
         else:
             kind = "judge"
         c["log"].append({"kind": kind, "tier": _tier_of(tier, fast)})
+        if kind == "repo-facts":
+            return {"facts": self.repo_facts}
         if kind == "gar-facts":
             c["garFacts"] += 1
             return GAR_FACTS
@@ -122,8 +127,8 @@ class FakeLLM:
         return r
 
 
-def fake_llm(judges=None, draft=GOOD_DRAFT) -> FakeLLM:
-    return FakeLLM(judges, draft)
+def fake_llm(judges=None, draft=GOOD_DRAFT, repo_facts=None) -> FakeLLM:
+    return FakeLLM(judges, draft, repo_facts)
 
 
 def make_deps(env=None, llm=None, vectors=None, code_vectors=None, facts=None, registry=None, policy=None) -> dict:
