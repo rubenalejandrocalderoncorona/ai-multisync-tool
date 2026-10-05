@@ -38,6 +38,38 @@ roleRef:
   name: multisync-webhook-launcher
   apiGroup: rbac.authorization.k8s.io
 ---
+# The docs-site deploy Job runs under this account. It can patch the two docs Deployments and read their rollout, nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: multisync-docs-deployer
+  namespace: multirepo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: multisync-docs-deployer
+  namespace: multirepo
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["docs-qa", "docs-prod"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: multisync-docs-deployer
+  namespace: multirepo
+subjects:
+  - kind: ServiceAccount
+    name: multisync-docs-deployer
+    namespace: multirepo
+roleRef:
+  kind: Role
+  name: multisync-docs-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
 # Non-secret settings the Jobs read. Change here instead of rebuilding anything.
 apiVersion: v1
 kind: ConfigMap
@@ -77,7 +109,7 @@ spec:
           command: ["python", "-m", "multisync.webhook"]
           ports: [{ containerPort: 8080 }]
           env:
-            - { name: ALLOWED_REPOS, value: "cAImanLabs/cAImanLabsCalendarScheduler" }   # source repos that may trigger a sync
+            - { name: ALLOWED_REPOS, value: "cAImanLabs/cAImanLabsCalendarScheduler,cAImanLabs/hermes-operations-console,cAImanLabs/socialmedia-ai-e2e-pipelines,rubenalejandrocalderoncorona/agent-trace-lint,rubenalejandrocalderoncorona/ai-multisync-tool,rubenalejandrocalderoncorona/raibis-lifeos,rubenalejandrocalderoncorona/rurag" }   # source repos that may trigger a sync (keep in step with config/repos.json)
             - { name: CENTRAL_REPO, value: "rubenalejandrocalderoncorona/multirepo-agent-docs" }
             - { name: TARGET_BRANCH, value: "qa" }
             - { name: JOB_IMAGE, value: "__PIPELINE_IMAGE__" }

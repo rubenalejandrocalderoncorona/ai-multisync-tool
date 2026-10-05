@@ -8,6 +8,7 @@ Events (all signed with WEBHOOK_SECRET, X-Hub-Signature-256):
   push                 a source repo in ALLOWED_REPOS, on its default branch      -> Job mode "sync"
   repository_dispatch  a source repo in ALLOWED_REPOS (client_payload fields)     -> Job mode "sync"
   pull_request closed  CENTRAL_REPO, merged, head docs-sync/*, base TARGET_BRANCH -> Job mode "index"
+  workflow_run         CENTRAL_REPO "Documentation site" finished OK on qa/main   -> Job mode "deploy" (rolls the docs site out)
   ping                 -> pong
 Anything unsigned gets 401; a signed event that does not qualify gets 200 "ignored: <why>". Payload fields are validated against strict
 patterns and reach the Job only as environment variables.
@@ -54,6 +55,9 @@ class Config:
         self.secret_name = env.get("JOB_SECRET", "multisync-secrets")
         self.qdrant_url = env.get("QDRANT_URL", "http://qdrant:6333")
         self.namespace = env.get("NAMESPACE", "")
+        self.deploy_workflow = env.get("DEPLOY_WORKFLOW", "Documentation site")
+        self.deploy_sa = env.get("DEPLOY_SERVICE_ACCOUNT", "multisync-docs-deployer")
+        self.prod_branch = env.get("PROD_BRANCH", "main")
         self.api_base = f"https://{env.get('KUBERNETES_SERVICE_HOST', 'kubernetes.default.svc')}:{env.get('KUBERNETES_SERVICE_PORT', '443')}"
         self.token = ""
         self.ssl_ctx: ssl.SSLContext | None = None
@@ -145,12 +149,29 @@ def plan(cfg: Config, event: str, p: dict) -> tuple[dict | None, str]:
         if not SHA_RE.match(merge or "") or not SHA_RE.match(base_sha or ""):
             return None, "invalid shas"
         return {"mode": "index", "source_repo": full_name, "sha": merge, "before": "", "target": base.get("ref"), "files": [], "base_sha": base_sha, "merge_sha": merge}, ""
+    if event == "workflow_run":
+        if full_name.lower() != cfg.central.lower():
+            return None, "not the central repository"
+        run = p.get("workflow_run") or {}
+        branch, sha = run.get("head_branch", ""), run.get("head_sha", "")
+        if p.get("action") != "completed" or run.get("name") != cfg.deploy_workflow or run.get("conclusion") != "success" or run.get("event") != "push":
+            return None, "not a successful push run of the docs site workflow"
+        if branch == cfg.prod_branch:
+            env_name = "prod"
+        elif branch == cfg.target_branch:
+            env_name = "qa"
+        else:
+            return None, f"branch {branch} is not deployed"
+        if not SHA_RE.match(sha) or len(sha) < 12:
+            return None, "invalid sha"
+        return {"mode": "deploy", "source_repo": full_name, "sha": sha, "before": "", "target": branch, "files": [], "deploy_env": env_name,
+                "image": f"ghcr.io/{full_name.lower()}:{env_name}-{sha[:12]}"}, ""
     return None, "event not handled"
 
 
 def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
     short = re.sub(r"[^a-z0-9]", "", j["sha"].lower())[:7]
-    prefix = "multisync-index-" if j["mode"] == "index" else "multisync-sync-"
+    prefix = {"index": "multisync-index-", "deploy": "multisync-deploy-"}.get(j["mode"], "multisync-sync-")
     name = f"{prefix}{short}-{int(now if now is not None else time.time())}"
 
     def e(k, v):
@@ -159,6 +180,8 @@ def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
     env = [e("JOB_MODE", j["mode"]), e("SOURCE_REPO", j["source_repo"]), e("SOURCE_SHA", j["sha"]), e("SOURCE_BEFORE", j["before"]), e("TARGET_BRANCH", j["target"]),
            e("CHANGED_FILES", "\n".join(j["files"])), e("CENTRAL_REPO", cfg.central), e("BASE_SHA", j.get("base_sha", "")), e("MERGE_SHA", j.get("merge_sha", "")),
            e("QDRANT_URL", cfg.qdrant_url), e("HOME", "/work")]
+    if j["mode"] == "deploy":
+        return _deploy_manifest(cfg, name, j)
     return {
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": {"name": name, "namespace": cfg.namespace, "labels": {"app": "multisync-job", "multisync/mode": j["mode"]}},
@@ -179,6 +202,31 @@ def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
                         "volumeMounts": [{"name": "work", "mountPath": "/work"}],
                     }],
                     "volumes": [{"name": "work", "emptyDir": {"sizeLimit": "2Gi"}}],
+                },
+            },
+        },
+    }
+
+
+def _deploy_manifest(cfg: Config, name: str, j: dict) -> dict:
+    """A small Job under a service account that can only patch the two docs Deployments. It has no model keys and no tokens."""
+    return {
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": name, "namespace": cfg.namespace, "labels": {"app": "multisync-job", "multisync/mode": "deploy"}},
+        "spec": {
+            "ttlSecondsAfterFinished": 300, "backoffLimit": 0, "activeDeadlineSeconds": 600,
+            "template": {
+                "metadata": {"labels": {"app": "multisync-job"}},
+                "spec": {
+                    "restartPolicy": "Never", "serviceAccountName": cfg.deploy_sa,
+                    "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000},
+                    "containers": [{
+                        "name": "deploy", "image": cfg.image, "imagePullPolicy": cfg.pull_policy,
+                        "command": ["python", "-m", "multisync.cli.deploy_site"],
+                        "env": [{"name": "DEPLOY_ENV", "value": j["deploy_env"]}, {"name": "IMAGE", "value": j["image"]}, {"name": "NAMESPACE", "value": cfg.namespace}],
+                        "resources": {"requests": {"cpu": "20m", "memory": "48Mi"}, "limits": {"memory": "128Mi"}},
+                        "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}, "readOnlyRootFilesystem": True},
+                    }],
                 },
             },
         },
