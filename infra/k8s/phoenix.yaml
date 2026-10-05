@@ -57,6 +57,16 @@ spec:
   selector: { app: phoenix }
   ports: [{ name: http, port: 6006, targetPort: 6006 }]
 ---
+# Phoenix expects the proxy to remove the /phoenix prefix (it adds PHOENIX_HOST_ROOT_PATH back itself in the links it renders).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: phoenix-strip
+  namespace: multirepo
+spec:
+  stripPrefix:
+    prefixes: ["/phoenix"]
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -64,6 +74,7 @@ metadata:
   namespace: multirepo
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: multirepo-phoenix-strip@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
