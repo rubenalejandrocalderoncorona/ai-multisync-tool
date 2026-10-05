@@ -101,7 +101,7 @@ The cascade is a LangGraph `StateGraph` (`pipeline/pipeline.js`). Nodes: `prefil
 
 Every node execution is logged with its status, duration and decision data (for example `minChunkSimilarity`, `precision`, `topK`):
 
-- to the runner log, one line per node;
+- to the Job log, one line per node;
 - to the FactStore `node_logs` table (queryable per `run_id`);
 - in the returned decision as `trail`, and in `pipeline-results.json` as `stages`;
 - optionally to LangSmith by setting `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` (LangGraph's native tracing; runs are named `docs-sync-decision`).
@@ -155,7 +155,7 @@ Five scenarios, each printing its stage trail: first publish, near-duplicate (co
 | `scripts/` | CLI entry points: `run_pipeline.js`, `bootstrap_context.js`, `onboard_check.js`, `context_search.js`, `index_approved.js`, `healthcheck.js`, `doctor.js`, `generate-summary.js`, `demo.js` |
 | `config/repos.json` | per-repo trust level, docs folder, style guide, glossary |
 | `config/feature-registry.json` | contract-point symbol → repos that must also ship |
-| `infra/` | docker-compose stack, k8s manifests for the `multirepo` namespace (migrate Job, in-cluster runner) and a standalone variant |
+| `infra/` | docker-compose stack, k8s manifests for the `multirepo` namespace (migrate Job, webhook receiver that starts the pipeline as ephemeral Jobs) and a standalone variant |
 | `.github/workflows/` | source, central, and post-approval workflows |
 | `test/` | unit tests with a scripted LLM (no network) |
 
@@ -181,7 +181,7 @@ make stack-check            # creates the Qdrant collection and FactStore schema
 
 Ports bind to `127.0.0.1`. Do **not** publish Postgres. Pick one way for CI to reach the stack:
 
-1. **Self-hosted GitHub runner on the VPS** (recommended): set repo variable `RUNNER_LABEL` to its label; `QDRANT_URL=http://localhost:6333`.
+1. **Webhook + ephemeral Jobs in the cluster** (recommended, see [docs/WEBHOOK-JOBS.md](docs/WEBHOOK-JOBS.md)): no standing runner, `QDRANT_URL=http://qdrant:6333`.
 2. **WireGuard/Tailscale** between the VPS and your runner.
 3. **`--profile edge`** for an HTTPS + API-key front on Qdrant only (Postgres still needs option 1 or 2).
 
@@ -195,7 +195,7 @@ Commit `sync-docs-central.yml` and `sync-docs-approved.yml` to its **default bra
 |---|---|
 | secret | `DOCS_SYNC_PAT`, `AI_API_KEY`, `QDRANT_API_KEY`, `FACTSTORE_DATABASE_URL` |
 | variable | `QDRANT_URL` |
-| optional | `RUNNER_LABEL`, `AI_API_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL`, `AI_EMBED_MODEL`, `AI_EMBED_DIM`, `TICKET_PROVIDER`, `SLACK_WEBHOOK_URL`, `JIRA_*` |
+| optional | `AI_API_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL`, `AI_EMBED_MODEL`, `AI_EMBED_DIM`, `TICKET_PROVIDER`, `SLACK_WEBHOOK_URL`, `JIRA_*` |
 
 Any OpenAI-compatible server works (OpenAI, vLLM, Ollama via `AI_API_BASE_URL=http://host:11434`).
 

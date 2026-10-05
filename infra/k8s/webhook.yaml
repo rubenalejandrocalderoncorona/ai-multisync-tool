@@ -1,0 +1,122 @@
+# Event-driven replacement for the standing GitHub Actions runner.
+#   GitHub webhook -> Traefik (/api/sync-webhook) -> this receiver (verifies X-Hub-Signature-256) -> one ephemeral Job per event.
+# The receiver idles at a few MB. The Job (image multisync-pipeline) reaches Qdrant and Postgres by service name, runs the pipeline,
+# opens the review PR and exits; Kubernetes deletes it after 5 minutes (ttlSecondsAfterFinished).
+#
+# Secrets (create by hand, never commit):
+#   kubectl -n multirepo create secret generic multisync-webhook --from-literal=WEBHOOK_SECRET="$(openssl rand -hex 32)"
+#   multisync-secrets must contain: FACTSTORE_DATABASE_URL, AI_API_KEY, DEEPSEEK_API_KEY, DOCS_SYNC_PAT, CAIMANDESK_API_TOKEN
+# Images (imported into k3s, or pushed to a registry the cluster can pull from):
+#   multisync-webhook:local   from webhook/Dockerfile
+#   multisync-pipeline:local  from Dockerfile.pipeline
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: multisync-webhook-launcher
+  namespace: multirepo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: multisync-webhook-launcher
+  namespace: multirepo
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: multisync-webhook-launcher
+  namespace: multirepo
+subjects:
+  - kind: ServiceAccount
+    name: multisync-webhook-launcher
+    namespace: multirepo
+roleRef:
+  kind: Role
+  name: multisync-webhook-launcher
+  apiGroup: rbac.authorization.k8s.io
+---
+# Non-secret settings the Jobs read. Change here instead of rebuilding anything.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multisync-config
+  namespace: multirepo
+data:
+  CAIMANDESK_URL: "http://caiman-tickets.caimanlabs-operations.svc.cluster.local"
+  CAIMANDESK_PUBLIC_URL: "https://tickets.caimanlabs.com.mx"
+  CAIMANDESK_PROJECT_ID: "10"
+  CAIMANDESK_TRANSPORT: "mcp"
+  TICKET_PROVIDER: "caimandesk"
+  AI_EXPENSIVE_MODEL: "gpt-5.6-terra"
+  AI_CHEAP_MODEL: "deepseek-v4-pro"
+  ROUTER_FORCE: "auto"
+  ROUTER_JUDGE: "expensive"
+  REVIEW_ENVIRONMENT_NAME: "QA"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multisync-webhook
+  namespace: multirepo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: multisync-webhook }
+  template:
+    metadata:
+      labels: { app: multisync-webhook }
+    spec:
+      serviceAccountName: multisync-webhook-launcher
+      containers:
+        - name: webhook
+          image: multisync-webhook:local
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8080 }]
+          env:
+            - { name: ALLOWED_REPOS, value: "cAImanLabs/cAImanLabsCalendarScheduler" }   # source repos that may trigger a sync
+            - { name: CENTRAL_REPO, value: "rubenalejandrocalderoncorona/multirepo-agent-docs" }
+            - { name: TARGET_BRANCH, value: "qa" }
+            - { name: JOB_IMAGE, value: "__PIPELINE_IMAGE__" }
+            - { name: JOB_IMAGE_PULL_POLICY, value: "IfNotPresent" }
+            - { name: QDRANT_URL, value: "http://qdrant:6333" }
+            - name: WEBHOOK_SECRET
+              valueFrom: { secretKeyRef: { name: multisync-webhook, key: WEBHOOK_SECRET } }
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 30 }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 48Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: multisync-webhook
+  namespace: multirepo
+spec:
+  selector: { app: multisync-webhook }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+# Same host as the personal site and the docs sites: Traefik picks the longest matching prefix, so only this path reaches the receiver.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: multisync-webhook
+  namespace: multirepo
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: rubenalejandrocalderoncorona.org
+      http:
+        paths:
+          - { path: /api/sync-webhook, pathType: Exact, backend: { service: { name: multisync-webhook, port: { number: 80 } } } }
