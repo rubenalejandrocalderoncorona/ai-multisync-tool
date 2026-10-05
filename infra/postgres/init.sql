@@ -116,3 +116,30 @@ DO $$ BEGIN
   ALTER TABLE repo_facts ADD CONSTRAINT repo_facts_verification_method_chk CHECK (verification_method IN ('deterministic','llm_quote_grounded'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE INDEX IF NOT EXISTS repo_facts_repo_idx ON repo_facts (repo, source);
+
+-- What a human did with each generated draft. Logging only: nothing reads this to approve anything. Once enough labelled examples exist per
+-- segment (diff_classification x model_tier_used), `multisync metrics review-readiness` reports whether a segment is reliable enough to consider
+-- auto-approval; auto_approval_eligible stays false until a future, separate change decides otherwise.
+-- One row per reviewed draft (a page) per pull request; the pair (pr_url, change_unit_id) is unique so a redelivered webhook cannot add a second row.
+CREATE TABLE IF NOT EXISTS review_outcomes (
+  id                     BIGSERIAL PRIMARY KEY,
+  change_unit_id         TEXT        NOT NULL,   -- '<source repo>@<source commit>:<page path>'
+  repo                   TEXT        NOT NULL,   -- the source repository
+  diff_classification    TEXT        NOT NULL CHECK (diff_classification IN ('internal','public_interface')),
+  model_tier_used        TEXT        NOT NULL CHECK (model_tier_used IN ('cheap','expensive')),
+  similarity_score       DOUBLE PRECISION,
+  judge_score_precision  DOUBLE PRECISION,
+  judge_score_recall     DOUBLE PRECISION,
+  judge_score_style      DOUBLE PRECISION,
+  judge_score_quality    DOUBLE PRECISION,
+  symbol_coverage_pct    DOUBLE PRECISION,       -- share of the changed public symbols the draft named (null when none were required)
+  outcome                TEXT        NOT NULL CHECK (outcome IN ('draft_with_noedition','draft_with_edition','draft_rejected')),
+  reviewed_by            TEXT,
+  reviewed_at            TIMESTAMPTZ,
+  policy_version         TEXT        NOT NULL,
+  auto_approval_eligible BOOLEAN     NOT NULL DEFAULT FALSE,
+  pr_url                 TEXT        NOT NULL,
+  recorded_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (pr_url, change_unit_id)
+);
+CREATE INDEX IF NOT EXISTS review_outcomes_segment_idx ON review_outcomes (diff_classification, model_tier_used, policy_version);

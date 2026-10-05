@@ -126,11 +126,25 @@ def test_factstore_real_postgres_schema_is_isolated_migrate_is_idempotent_everyt
 
         with pytest.raises(psycopg.errors.CheckViolation):
             f._q("INSERT INTO repo_facts (repo, category, fact, evidence, source, verification_method) VALUES (%s,'x','bogus','e','llm','guess')", (repo,))
+        # review outcomes: the real table, its constraints, idempotence and the readiness counts
+        f.record_decision({"runId": "r-review", "repo": repo, "path": "p.md", "commit": "abc1234def0", "outcome": "pending_review", "reviewerAction": "needs_review", "reason": "x",
+                           "metrics": {"diffClassification": "internal", "modelTier": "cheap"}, "attempts": []})
+        assert f.find_decision(repo, "abc1234", "p.md")["metrics"]["modelTier"] == "cheap" and f.find_decision(repo, "ffff", "p.md") is None
+        row = {"change_unit_id": f"{repo}@abc1234def0:p.md", "repo": repo, "diff_classification": "internal", "model_tier_used": "cheap", "similarity_score": 0.3,
+               "judge_score_precision": 1.0, "judge_score_recall": 0.9, "judge_score_style": 0.9, "judge_score_quality": 0.9, "symbol_coverage_pct": 100.0,
+               "outcome": "draft_with_noedition", "reviewed_by": "ruben", "reviewed_at": "2026-10-05T12:00:00Z", "policy_version": "v1-itest", "pr_url": f"https://x/{repo}/pull/1"}
+        assert f.record_review_outcome(row) is True and f.record_review_outcome(row) is False, "a redelivered event adds no second row"
+        f.record_review_outcome({**row, "change_unit_id": f"{repo}@abc1234def0:q.md", "outcome": "draft_with_edition"})
+        assert f.review_outcome_counts("internal", "cheap", "v1-itest") == {"n": 2, "noedition": 1, "edition": 1, "rejected": 0}
+        assert f._q("SELECT auto_approval_eligible FROM review_outcomes WHERE repo=%s", (repo,))[0]["auto_approval_eligible"] is False
+        for bad in ({"outcome": "approved"}, {"model_tier_used": "medium"}, {"diff_classification": "other"}):
+            with pytest.raises(psycopg.errors.CheckViolation):
+                f.record_review_outcome({**row, "change_unit_id": "z", "pr_url": "https://x/z", **bad})
         runs = f.list_runs(5, repo)
         assert runs and runs[0]["run_id"] == "r1" and runs[0]["nodes"] == 1 and runs[0]["outcomes"] == {"fallback": 1}
         assert [x["node"] for x in f.run_logs("r1") if x["repo"] == repo] == ["judge"]
     finally:
-        for t in ("claims", "decisions", "node_logs", "context_state", "symbols", "repo_facts"):
+        for t in ("claims", "decisions", "node_logs", "context_state", "symbols", "repo_facts", "review_outcomes"):
             f._q(f"DELETE FROM {t} WHERE repo=%s", (repo,))
         f._q("DELETE FROM doc_refs WHERE doc_repo LIKE %s", (f"{repo}%",))
         f.close()

@@ -12,6 +12,9 @@ dependencies = [
   "opentelemetry-exporter-otlp-proto-http>=1.25",
 ]
 
+[project.scripts]
+multisync = "multisync.cli.main:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 

@@ -7,7 +7,8 @@ Standard library only (no httpx, no langgraph), so it idles at roughly 15 MB. It
 Events (all signed with WEBHOOK_SECRET, X-Hub-Signature-256):
   push                 a source repo in ALLOWED_REPOS, on its default branch      -> Job mode "sync"
   repository_dispatch  a source repo in ALLOWED_REPOS (client_payload fields)     -> Job mode "sync"
-  pull_request closed  CENTRAL_REPO, merged, head docs-sync/*, base TARGET_BRANCH -> Job mode "index"
+  pull_request closed  CENTRAL_REPO, merged, head docs-sync/*, base TARGET_BRANCH -> Job mode "index" (which also logs the review outcome)
+  pull_request closed  the same, but closed WITHOUT merging                        -> Job mode "review" (logs the review outcome, nothing else)
   workflow_run         CENTRAL_REPO "Documentation site" finished OK on qa/main   -> Job mode "deploy" (rolls the docs site out)
   ping                 -> pong
 Anything unsigned gets 401; a signed event that does not qualify gets 200 "ignored: <why>". Payload fields are validated against strict
@@ -38,6 +39,8 @@ REF_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 FILE_RE = re.compile(r"^[A-Za-z0-9_@+=,. /-]+$")
 ZERO_RE = re.compile(r"^0+$")
+LOGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$")
+TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 
 log = logging.getLogger("multisync.webhook")
 
@@ -143,12 +146,26 @@ def plan(cfg: Config, event: str, p: dict) -> tuple[dict | None, str]:
         pr = p.get("pull_request") or {}
         head_ref = (pr.get("head") or {}).get("ref", "")
         base = pr.get("base") or {}
-        if p.get("action") != "closed" or not pr.get("merged") or not head_ref.startswith("docs-sync/") or base.get("ref") != cfg.target_branch:
-            return None, f"not a merged docs-sync PR into {cfg.target_branch}"
+        if p.get("action") != "closed" or not head_ref.startswith("docs-sync/") or base.get("ref") != cfg.target_branch:
+            return None, f"not a closed docs-sync PR into {cfg.target_branch}"
+        number = pr.get("number")
+        review = {
+            "number": number if isinstance(number, int) and number > 0 else 0,
+            "url": pr.get("html_url", "") if re.match(rf"^https://github\.com/{re.escape(cfg.central)}/pull/\d+$", pr.get("html_url", ""), re.I) else "",
+            "merged": bool(pr.get("merged")),
+            "by": (p.get("sender") or {}).get("login", "") if LOGIN_RE.match((p.get("sender") or {}).get("login", "")) else "",
+            "at": (pr.get("merged_at") or pr.get("closed_at") or "") if TIME_RE.match(pr.get("merged_at") or pr.get("closed_at") or "") else "",
+        }
+        if not pr.get("merged"):
+            # Closed without merging: nothing is indexed and nothing is routed. The only thing started is the job that logs the outcome.
+            head_sha = (pr.get("head") or {}).get("sha", "")
+            if not review["number"] or not SHA_RE.match(head_sha or ""):
+                return None, "invalid PR number or sha"
+            return {"mode": "review", "source_repo": full_name, "sha": head_sha, "before": "", "target": base.get("ref"), "files": [], "pr": review}, ""
         merge, base_sha = pr.get("merge_commit_sha", ""), base.get("sha", "")
         if not SHA_RE.match(merge or "") or not SHA_RE.match(base_sha or ""):
             return None, "invalid shas"
-        return {"mode": "index", "source_repo": full_name, "sha": merge, "before": "", "target": base.get("ref"), "files": [], "base_sha": base_sha, "merge_sha": merge}, ""
+        return {"mode": "index", "source_repo": full_name, "sha": merge, "before": "", "target": base.get("ref"), "files": [], "base_sha": base_sha, "merge_sha": merge, "pr": review}, ""
     if event == "workflow_run":
         if full_name.lower() != cfg.central.lower():
             return None, "not the central repository"
@@ -171,7 +188,7 @@ def plan(cfg: Config, event: str, p: dict) -> tuple[dict | None, str]:
 
 def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
     short = re.sub(r"[^a-z0-9]", "", j["sha"].lower())[:7]
-    prefix = {"index": "multisync-index-", "deploy": "multisync-deploy-"}.get(j["mode"], "multisync-sync-")
+    prefix = {"index": "multisync-index-", "review": "multisync-review-", "deploy": "multisync-deploy-"}.get(j["mode"], "multisync-sync-")
     name = f"{prefix}{short}-{int(now if now is not None else time.time())}"
 
     def e(k, v):
@@ -180,6 +197,9 @@ def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
     env = [e("JOB_MODE", j["mode"]), e("SOURCE_REPO", j["source_repo"]), e("SOURCE_SHA", j["sha"]), e("SOURCE_BEFORE", j["before"]), e("TARGET_BRANCH", j["target"]),
            e("CHANGED_FILES", "\n".join(j["files"])), e("CENTRAL_REPO", cfg.central), e("BASE_SHA", j.get("base_sha", "")), e("MERGE_SHA", j.get("merge_sha", "")),
            e("QDRANT_URL", cfg.qdrant_url), e("HOME", "/work")]
+    pr = j.get("pr")
+    if pr:  # review-outcome logging (modes index and review)
+        env += [e("PR_NUMBER", str(pr["number"] or "")), e("PR_URL", pr["url"]), e("PR_MERGED", "true" if pr["merged"] else "false"), e("REVIEWED_BY", pr["by"]), e("REVIEWED_AT", pr["at"])]
     if j["mode"] == "deploy":
         return _deploy_manifest(cfg, name, j)
     return {

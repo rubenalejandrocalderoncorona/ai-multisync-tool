@@ -36,6 +36,7 @@ from .critic import evaluate, judge as run_judge
 from .prefilter import prefilter
 from .registry import cross_repo_check
 from .router import route_change
+from .config import policy_version
 from .repofacts import checked_repo_facts, facts_text, known_fact_lines
 from .stages import analyze_code, plan_docs, plan_text, sheet_text
 from .symbols import public_symbols
@@ -231,7 +232,7 @@ def process_change(change: dict, deps) -> dict:
         r = route_change(change, registry, facts, cfg["ai"]["routerForce"])
         return {"note": {"tier": r["tier"], "reasons": r["reasons"], "publicChanged": len(r["signals"]["publicChanged"]), "publicTotal": r["signals"]["total"],
                          "registryHits": len(r["signals"]["registry"]), "referencedBy": r["signals"]["referencedBy"]},
-                "update": {"tier": r["tier"], "routeInfo": r, "ctx": {"route": {"tier": r["tier"], "reasons": r["reasons"]}}}}
+                "update": {"tier": r["tier"], "routeInfo": r, "metrics": {"diffClassification": r["classification"]}, "ctx": {"route": {"tier": r["tier"], "reasons": r["reasons"]}}}}
 
     def n_similarity(s):
         hypothetical = None
@@ -360,14 +361,18 @@ def process_change(change: dict, deps) -> dict:
         v = verify_draft(s["draft"], public_changed, change.get("existing") or "", change["filePath"], change.get("title") or None,
                          plan.get("purpose") or change.get("brief") or "Generated documentation.")
         note = {"tier": s["tier"], "ok": v["ok"], **v["metrics"], **({} if v["ok"] else {"reasons": v["reasons"][:4]})}
+        cov = None
+        if v["metrics"].get("mentioned"):
+            got, total = (int(x) for x in v["metrics"]["mentioned"].split("/"))
+            cov = round(100.0 * got / total, 1) if total else None
         if v["ok"]:
-            return {"note": note, "update": {"verifyFailed": False}}
+            return {"note": note, "update": {"verifyFailed": False, "metrics": {"symbolCoverage": cov}}}
         if s["tier"] == "cheap" and not s["escalated"]:
             return {"status": "escalate", "note": {**note, "escalatedTo": "expensive"},
                     "update": {"tier": "expensive", "escalated": True, "escalatePending": True, "feedback": v["reasons"], "iter": s["iter"] - 1}}  # the redo is free
         attempt = {"n": s["iter"], "widened": s["widened"], "topK": t["topKWidened"] if s["widened"] else t["topK"], "failure": "deterministic_check", "tier": s["tier"]}
         return {"status": "rejected", "note": note,
-                "update": {"verifyFailed": True, "failure": {"tag": "deterministic_check", "feedback": v["reasons"]}, "feedback": v["reasons"], "attempts": [attempt], "accepted": None}}
+                "update": {"verifyFailed": True, "failure": {"tag": "deterministic_check", "feedback": v["reasons"]}, "feedback": v["reasons"], "attempts": [attempt], "accepted": None, "metrics": {"symbolCoverage": cov}}}
 
     def n_judge(s):
         judge_tier = s["tier"] if cfg["ai"]["judgeTier"] == "follow" else cfg["ai"]["judgeTier"]
@@ -429,7 +434,8 @@ def process_change(change: dict, deps) -> dict:
                 "update": {"decision": finish(s, {
                     "outcome": "published" if auto else "pending_review", "reviewerAction": "auto_published" if auto else "needs_review",
                     "reason": f"passed all checks in {len(s['attempts'])} attempt(s)", "action": "write", "content": content, "subfolder": subfolder,
-                    "targetPath": target_path_for(change["filePath"], policy, cfg["paths"]["docsRoot"], subfolder), "metrics": {**s["metrics"], "final": final}})}}
+                    "targetPath": target_path_for(change["filePath"], policy, cfg["paths"]["docsRoot"], subfolder),
+                    "metrics": {**s["metrics"], "final": final, "policyVersion": policy_version(cfg), "modelTier": s["tier"], "escalated": bool(s["escalated"])}})}}
 
     def n_fallback(s):
         # Cross-repo blocks arrive with a decision already built; judge exhaustion builds it here.
