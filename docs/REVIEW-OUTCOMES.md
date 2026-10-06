@@ -86,3 +86,12 @@ Two choices to know about:
   as pending instead of dragging the percentage down.
 - A warning needs at least `--min-audits` verdicts (default 5, `AUDIT_MIN_SAMPLES`); with two audits a single miss is a 50-point swing by chance. Below
   that the report says how many more are needed instead of raising an alarm.
+
+
+# Replaced drafts
+
+A repository that changes often (this tool is one) would otherwise pile up one open review pull request per push. When a sync opens a new review
+pull request, the job closes the older open docs-sync pull requests of **the same source repository** that the new one replaces
+(`multisync.cli.supersede`). A pull request is closed only if the new one contains every page it contained, so no page is silently dropped; any other
+stays open. Each closure adds a comment ("Superseded by #N") and a hidden marker to the old body, and the review-outcome log ignores marked pull
+requests: a draft that was replaced says nothing about its quality, so it is never counted as `draft_rejected`.

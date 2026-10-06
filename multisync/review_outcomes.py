@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 import httpx
 
+SUPERSEDED_MARKER = "<!-- multisync:superseded -->"
 SEGMENT_TIERS = ("cheap", "expensive")
 SEGMENT_CLASSES = ("internal", "public_interface")
 
@@ -69,6 +70,23 @@ class GitHub:
         data = r.json()
         return base64.b64decode(data["content"]).decode("utf-8") if data.get("encoding") == "base64" else data.get("content")
 
+    def open_prs(self, base: str) -> list[dict]:
+        out, page = [], 1
+        while True:
+            r = self._c.get(f"/repos/{self.repo}/pulls", params={"state": "open", "base": base, "per_page": 100, "page": page})
+            r.raise_for_status()
+            chunk = r.json()
+            out += chunk
+            if len(chunk) < 100:
+                return out
+            page += 1
+
+    def supersede(self, number: int, body: str, by_number: int) -> None:
+        """Mark a pull request as replaced (so it is not logged as a review), say why, and close it."""
+        self._c.patch(f"/repos/{self.repo}/pulls/{number}", json={"body": f"{body or ''}\n\n{SUPERSEDED_MARKER}"}).raise_for_status()
+        self._c.post(f"/repos/{self.repo}/issues/{number}/comments", json={"body": f"Superseded by #{by_number}: a newer sync of the same repository regenerated every page this pull request contained."}).raise_for_status()
+        self._c.patch(f"/repos/{self.repo}/pulls/{number}", json={"state": "closed"}).raise_for_status()
+
     def close(self) -> None:
         self._c.close()
 
@@ -84,6 +102,8 @@ def _iso(ts: str | None) -> str | None:
 def collect_rows(facts, gh, number: int, pr_url: str, reviewed_by: str | None, reviewed_at: str | None, merged: bool) -> tuple[list[dict], list[str]]:
     """Rows for every draft of one closed docs-sync PR, and the reasons any page was skipped (no stored decision, an unreadable file...)."""
     pr = gh.pr(number)
+    if SUPERSEDED_MARKER in (pr.get("body") or ""):
+        return [], ["closed because a newer draft replaced it: not a review outcome"]  # a replaced draft says nothing about its quality
     info = parse_pr_body(pr.get("body"))
     if not info:
         return [], ["the pull request body is not a docs-sync body"]
@@ -198,3 +218,24 @@ def audit_gap(raw_counts: dict, audit: dict, max_gap_pp: float = 10.0, min_audit
     return {"raw_noedition_pct": raw_pct, "raw_n": n, "raw_noedition": k, "audit_sampled": audit["sampled"], "audit_pending": audit["sampled"] - audited, "audited": audited,
             "confirmed_accurate": accurate, "pct_confirmed_accurate": pct, "accurate_wilson_lower_pct": 100 * lo if audited else None, "accurate_wilson_upper_pct": 100 * hi if audited else None,
             "gap_pp": gap, "max_gap_pp": max_gap_pp, "min_audits": min_audits, "enough_audits": enough, "drift_warning": drift}
+
+
+def supersede_older(gh, new_number: int, source_repo: str, base: str) -> dict:
+    """Close the older open docs-sync pull requests of `source_repo` that a new one replaces, so a busy repository does not pile up a review queue
+    of stale drafts. A pull request is only closed when the new one contains every page it contained; otherwise closing it would drop a page nobody
+    regenerated, and it is left open. Returns {closed: [numbers], kept: [(number, reason)]}."""
+    slug = re.escape(source_repo.replace("/", "-"))
+    pattern = re.compile(rf"^docs-sync/{slug}-[0-9a-f]{{7}}$")
+    new_files = set(gh.files(new_number))
+    closed, kept = [], []
+    for pr in gh.open_prs(base):
+        n = pr["number"]
+        if n == new_number or not pattern.match((pr.get("head") or {}).get("ref", "")):
+            continue
+        old_files = set(gh.files(n))
+        if old_files and old_files <= new_files:
+            gh.supersede(n, pr.get("body") or "", new_number)
+            closed.append(n)
+        else:
+            kept.append((n, "it changes pages the newer pull request does not contain"))
+    return {"closed": closed, "kept": kept}
