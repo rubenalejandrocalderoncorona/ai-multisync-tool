@@ -47,3 +47,42 @@ mixed unless `--policy-version` is given; compare like with like.
 
 The command needs a database connection (`FACTSTORE_DATABASE_URL`; on the VPS through an ssh tunnel to `postgres-0`). Installed with `pip install -e .`
 it is `multisync`; without installing, `python -m multisync.cli.main metrics review-readiness ...`.
+
+
+# Audit sampling: is "unedited" the same as "correct"?
+
+`draft_with_noedition` only means the reviewer changed nothing. A rubber-stamped merge looks identical to a carefully verified one, so as trust in the
+pipeline grows, review rigor can drop while the metric above keeps looking fine. Audit sampling measures that gap. **Detection and reporting only:** no
+approval, routing or auto-pass logic reads any of this.
+
+**Sampling.** Right after a `draft_with_noedition` row is logged, it is sampled with probability `AUDIT_SAMPLE_RATE` (default `0.10`, set in the
+`multisync-config` ConfigMap; clamped to 0 to 1). Edited and rejected drafts are never sampled, and a redelivered webhook cannot sample twice. A sampled
+row gets `audit_sampled = true`; the rows with no verdict yet are the **audit queue**. When ticketing is configured, each sampled row also opens a
+`[docs-audit] #<id> <repo>@<sha> <page>` task in cAImanDesk.
+
+**The second reviewer.** The auditor reads the published page and confirms its factual statements against the code at the source commit, independently.
+To avoid anchoring, neither the queue nor the ticket shows the first reviewer, the outcome, the scores or the pull request.
+
+```bash
+multisync audit list                         # open audits: id, page, repo and commit only
+multisync audit show 12                      # the page and the code commit to check it against
+multisync audit submit 12 --reviewer <login> --accurate yes|no --notes "route /x is POST, not GET"
+```
+A submission by the original reviewer (any capitalization) is refused, by the CLI and by a database constraint (`audit_reviewer` must differ from
+`reviewed_by`). An audit is final, and only a sampled row can have one. New columns: `audit_sampled`, `audit_reviewer`, `audit_verified_accurate`,
+`audit_notes`, `audited_at`.
+
+**The gap report.**
+
+```bash
+multisync metrics audit-gap --segment public_interface:expensive            # --max-gap 10  --min-audits 5  --policy-version ...  --json
+```
+It reports, for the segment, the raw no-edit rate (the same counts as `review-readiness`), how many audits are sampled, finished and pending, the share
+of finished audits confirmed accurate (with a 95% Wilson interval), and the gap in percentage points. It **warns when the audited accuracy is more than
+`--max-gap` points (default 10, `AUDIT_MAX_GAP_PP`) below the raw rate** (exit code 1): that gap is the rubber-stamp signal.
+
+Two choices to know about:
+- `pct_confirmed_accurate` is computed over audits **that have a verdict**. A sampled row nobody has audited yet is unknown, not inaccurate, so it is shown
+  as pending instead of dragging the percentage down.
+- A warning needs at least `--min-audits` verdicts (default 5, `AUDIT_MIN_SAMPLES`); with two audits a single miss is a 50-point swing by chance. Below
+  that the report says how many more are needed instead of raising an alarm.

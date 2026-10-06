@@ -12,6 +12,8 @@ back from the decision stored then (`decisions.metrics`); the pull request body 
 from __future__ import annotations
 
 import base64
+import os
+import random
 import re
 from datetime import datetime, timezone
 
@@ -120,10 +122,37 @@ def collect_rows(facts, gh, number: int, pr_url: str, reviewed_by: str | None, r
     return rows, skipped
 
 
-def record(facts, gh, number: int, pr_url: str, reviewed_by: str | None, reviewed_at: str | None, merged: bool) -> dict:
+def audit_sample_rate(env=None) -> float:
+    """AUDIT_SAMPLE_RATE: the probability that a draft merged unchanged is sampled for a second-pass audit. Default 0.10, clamped to [0, 1]."""
+    raw = (env if env is not None else os.environ).get("AUDIT_SAMPLE_RATE", "")
+    try:
+        return min(1.0, max(0.0, float(raw))) if raw != "" else 0.10
+    except ValueError:
+        return 0.10
+
+
+def record(facts, gh, number: int, pr_url: str, reviewed_by: str | None, reviewed_at: str | None, merged: bool,
+           audit_rate: float | None = None, rng=random.random, on_sampled=None) -> dict:
+    """Log the outcome of one closed PR; then sample each newly logged `draft_with_noedition` row for a second-pass audit with probability
+    `audit_rate`. `on_sampled(audit_id, row)` lets the caller open a ticket. Sampling is detection only: it changes nothing about the review."""
     rows, skipped = collect_rows(facts, gh, number, pr_url, reviewed_by, reviewed_at, merged)
-    inserted = sum(1 for r in rows if facts.record_review_outcome(r))
-    return {"rows": len(rows), "inserted": inserted, "duplicates": len(rows) - inserted, "skipped": skipped, "outcomes": [r["outcome"] for r in rows]}
+    rate = audit_sample_rate() if audit_rate is None else audit_rate
+    inserted, sampled = 0, []
+    for r in rows:
+        if not facts.record_review_outcome(r):
+            continue
+        inserted += 1
+        if r["outcome"] == "draft_with_noedition" and rng() < rate:
+            audit_id = facts.sample_for_audit(r["pr_url"], r["change_unit_id"])
+            if audit_id is not None:
+                sampled.append(audit_id)
+                if on_sampled:
+                    try:
+                        on_sampled(audit_id, r)
+                    except Exception as e:  # noqa: BLE001 - the queue is the table; a ticket that fails to open must not undo the sampling
+                        skipped.append(f"audit {audit_id}: ticket not opened ({e})")
+    return {"rows": len(rows), "inserted": inserted, "duplicates": len(rows) - inserted, "skipped": skipped, "outcomes": [r["outcome"] for r in rows], "audit_sampled": sampled,
+            "audit_rate": rate}
 
 
 # ── readiness ────────────────────────────────────────────────────────────────────
@@ -150,3 +179,22 @@ def readiness(counts: dict, threshold: float = 0.85, min_samples: int = 30, z: f
         reasons.append(f"Wilson lower bound {lo:.3f} is below the threshold {threshold}")
     return {"n": n, "noedition": k, "edition": counts.get("edition", 0), "rejected": counts.get("rejected", 0), "rate": (k / n) if n else 0.0,
             "wilson_lower": lo, "wilson_upper": hi, "z": z, "threshold": threshold, "min_samples": min_samples, "ready": not reasons, "reasons": reasons}
+
+
+# ── audit gap ────────────────────────────────────────────────────────────────────
+def audit_gap(raw_counts: dict, audit: dict, max_gap_pp: float = 10.0, min_audits: int = 5, z: float = 1.96) -> dict:
+    """Compare the raw share of drafts merged unchanged with the share an independent second reviewer confirmed accurate.
+
+    pct_confirmed_accurate is computed over audits that have a verdict; sampled-but-pending rows are unknown, not inaccurate, so they are reported
+    separately. A drift warning needs at least `min_audits` verdicts, since one miss among three audits would be a 33-point swing by chance alone."""
+    n, k = raw_counts["n"], raw_counts["noedition"]
+    raw_pct = 100.0 * k / n if n else 0.0
+    audited, accurate = audit["audited"], audit["accurate"]
+    pct = 100.0 * accurate / audited if audited else None
+    lo, hi = wilson_interval(accurate, audited, z)
+    gap = (raw_pct - pct) if pct is not None else None
+    enough = audited >= min_audits
+    drift = bool(enough and gap is not None and gap > max_gap_pp)
+    return {"raw_noedition_pct": raw_pct, "raw_n": n, "raw_noedition": k, "audit_sampled": audit["sampled"], "audit_pending": audit["sampled"] - audited, "audited": audited,
+            "confirmed_accurate": accurate, "pct_confirmed_accurate": pct, "accurate_wilson_lower_pct": 100 * lo if audited else None, "accurate_wilson_upper_pct": 100 * hi if audited else None,
+            "gap_pp": gap, "max_gap_pp": max_gap_pp, "min_audits": min_audits, "enough_audits": enough, "drift_warning": drift}

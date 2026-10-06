@@ -157,6 +157,39 @@ class PgFactStore:
             sql, args = sql + " AND policy_version=%s", args + [policy_version]
         return self._q(sql, args)[0]
 
+    # ── audit sampling (detection and reporting only) ────────────────────────────
+    def sample_for_audit(self, pr_url, change_unit_id):
+        """Mark a row as sampled for a second-pass audit; returns its id (None if there is no such row)."""
+        rows = self._q("UPDATE review_outcomes SET audit_sampled=TRUE WHERE pr_url=%s AND change_unit_id=%s RETURNING id", (pr_url, change_unit_id))
+        return rows[0]["id"] if rows else None
+
+    def pending_audits(self, limit=50):
+        """The audit queue. Deliberately without reviewed_by, outcome or scores: the second reviewer must not be anchored by the first."""
+        return self._q("SELECT id, repo, change_unit_id FROM review_outcomes WHERE audit_sampled AND audit_verified_accurate IS NULL ORDER BY id LIMIT %s", (limit,))
+
+    def audit_item(self, audit_id):
+        rows = self._q("SELECT id, repo, change_unit_id, audit_sampled, audit_verified_accurate FROM review_outcomes WHERE id=%s", (audit_id,))
+        return rows[0] if rows else None
+
+    def submit_audit(self, audit_id, reviewer, accurate, notes=None):
+        """Record the second reviewer's verdict. Refuses the original reviewer, an unsampled row and a row that was already audited."""
+        rows = self._q("SELECT reviewed_by, audit_sampled, audit_verified_accurate FROM review_outcomes WHERE id=%s", (audit_id,))
+        if not rows or not rows[0]["audit_sampled"]:
+            raise ValueError(f"audit {audit_id}: not found or not sampled for audit")
+        if rows[0]["audit_verified_accurate"] is not None:
+            raise ValueError(f"audit {audit_id}: already audited")
+        if rows[0]["reviewed_by"] and rows[0]["reviewed_by"].lower() == reviewer.lower():
+            raise ValueError("the audit must be done by someone other than the original reviewer")
+        self._q("UPDATE review_outcomes SET audit_reviewer=%s, audit_verified_accurate=%s, audit_notes=%s, audited_at=now() WHERE id=%s", (reviewer, bool(accurate), notes, audit_id))
+
+    def audit_counts(self, diff_classification, model_tier, policy_version=None):
+        sql = ("SELECT count(*) FILTER (WHERE audit_sampled)::int AS sampled, count(*) FILTER (WHERE audit_verified_accurate IS NOT NULL)::int AS audited, "
+               "count(*) FILTER (WHERE audit_verified_accurate)::int AS accurate FROM review_outcomes WHERE diff_classification=%s AND model_tier_used=%s")
+        args = [diff_classification, model_tier]
+        if policy_version:
+            sql, args = sql + " AND policy_version=%s", args + [policy_version]
+        return self._q(sql, args)[0]
+
     # ── facts about a repository as a whole ──────────────────────────────────────
     def replace_repo_facts(self, repo, source, rows, commit) -> None:
         """Replace all facts of one source (deterministic | llm) for a repo."""
@@ -231,8 +264,40 @@ class MemoryFactStore:
         self.review_outcomes = getattr(self, "review_outcomes", [])
         if any(x["pr_url"] == r["pr_url"] and x["change_unit_id"] == r["change_unit_id"] for x in self.review_outcomes):
             return False
-        self.review_outcomes.append({**r, "auto_approval_eligible": False})
+        self.review_outcomes.append({**r, "auto_approval_eligible": False, "audit_sampled": False, "id": len(self.review_outcomes) + 1})
         return True
+
+    def sample_for_audit(self, pr_url, change_unit_id):
+        for i, x in enumerate(getattr(self, "review_outcomes", []), 1):
+            if x["pr_url"] == pr_url and x["change_unit_id"] == change_unit_id:
+                x["audit_sampled"], x["id"] = True, i
+                return i
+        return None
+
+    def pending_audits(self, limit=50):
+        return [{"id": x["id"], "repo": x["repo"], "change_unit_id": x["change_unit_id"]} for x in getattr(self, "review_outcomes", [])
+                if x.get("audit_sampled") and x.get("audit_verified_accurate") is None][:limit]
+
+    def audit_item(self, audit_id):
+        x = next((x for x in getattr(self, "review_outcomes", []) if x.get("id") == audit_id), None)
+        return x and {"id": x["id"], "repo": x["repo"], "change_unit_id": x["change_unit_id"], "audit_sampled": x.get("audit_sampled", False),
+                      "audit_verified_accurate": x.get("audit_verified_accurate")}
+
+    def submit_audit(self, audit_id, reviewer, accurate, notes=None):
+        x = next((x for x in getattr(self, "review_outcomes", []) if x.get("id") == audit_id), None)
+        if not x or not x.get("audit_sampled"):
+            raise ValueError(f"audit {audit_id}: not found or not sampled for audit")
+        if x.get("audit_verified_accurate") is not None:
+            raise ValueError(f"audit {audit_id}: already audited")
+        if x.get("reviewed_by") and x["reviewed_by"].lower() == reviewer.lower():
+            raise ValueError("the audit must be done by someone other than the original reviewer")
+        x.update(audit_reviewer=reviewer, audit_verified_accurate=bool(accurate), audit_notes=notes)
+
+    def audit_counts(self, diff_classification, model_tier, policy_version=None):
+        rows = [x for x in getattr(self, "review_outcomes", []) if x["diff_classification"] == diff_classification and x["model_tier_used"] == model_tier
+                and (not policy_version or x["policy_version"] == policy_version)]
+        return {"sampled": sum(1 for x in rows if x.get("audit_sampled")), "audited": sum(1 for x in rows if x.get("audit_verified_accurate") is not None),
+                "accurate": sum(1 for x in rows if x.get("audit_verified_accurate"))}
 
     def review_outcome_counts(self, diff_classification, model_tier, policy_version=None):
         rows = [x for x in getattr(self, "review_outcomes", []) if x["diff_classification"] == diff_classification and x["model_tier_used"] == model_tier

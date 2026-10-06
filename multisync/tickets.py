@@ -174,6 +174,21 @@ class Tickets:
                                f'<p>Pull request updated: <a href="{esc(pr_url)}">{esc(pr_url)}</a></p>')
         return {**r, "ref": f"desk:{r['id']}"}
 
+    def open_audit(self, audit_id: int, repo: str, commit: str, page: str) -> str | None:
+        """A second-pass audit request. By design it names neither the original reviewer nor the review outcome, and does not link the pull request, so the
+        auditor judges the page against the code rather than against the first reviewer's verdict. Returns the ticket URL."""
+        if not self.backend:
+            return None
+        title = f"[docs-audit] #{audit_id} {repo}@{str(commit)[:7]} {page}"
+        html = (f"<p>Independent accuracy check (audit #{audit_id}).</p>"
+                f"<p><strong>Page:</strong> <code>{esc(page)}</code> generated from <strong>{esc(repo)}</strong> at commit "
+                f'<a href="https://github.com/{esc(repo)}/tree/{esc(commit)}"><code>{esc(str(commit)[:7])}</code></a> (the code to check it against).</p>'
+                "<p>Read the published page and confirm each factual statement against the code at that commit. Do not rely on anyone else's review of it. "
+                f"You must not be the person who reviewed the page originally.</p>"
+                f"<p>Submit the verdict: <code>multisync audit submit {audit_id} --reviewer &lt;your github login&gt; --accurate yes|no --notes \"...\"</code></p>")
+        r = self._open_or_note(title, html, 2, "<p>Still waiting for an audit.</p>")
+        return r["url"]
+
     def qa_deployed(self, ref, pr_url=None, site_url=None) -> bool:
         """The docs PR was merged into the QA branch: the page is live in QA, the ticket stays open until promotion."""
         if not self.backend:
