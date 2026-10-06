@@ -50,11 +50,149 @@ def _block_of(text: str, index: int) -> str:
     return text[index:open_ + 400]
 
 
+# ── Java (Spring MVC / JAX-RS / JPA) ────────────────────────────────────────────
+_JAVA_TOKENS = re.compile(r"\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])+'|//[^\n]*|/\*.*?\*/", re.S)
+_SPRING_VERBS = {"Get": "GET", "Post": "POST", "Put": "PUT", "Delete": "DELETE", "Patch": "PATCH"}
+_ANNOTATION_ARGS = r"((?:[^()\"]|\"(?:\\.|[^\"\\])*\")*)"
+_NON_PATH_ATTRS = re.compile(r"\b(?:produces|consumes|params|headers|name|method)\s*=\s*(?:\{[^}]*\}|\"(?:\\.|[^\"\\])*\"|[^,)]*)")
+
+
+def _java_strip_comments(text: str) -> str:
+    """Blank out comments (keeping strings and newlines), so a commented-out route or a Javadoc example is not a symbol."""
+    return _JAVA_TOKENS.sub(lambda m: m.group(0) if m.group(0)[0] in "\"'" else re.sub(r"[^\n]", " ", m.group(0)), text)
+
+
+def _java_constants(text: str) -> dict[str, str]:
+    """`static final String NAME = "/a" + OTHER + "/b";` constants of one file, so @GetMapping(NAME + "/{id}") resolves."""
+    consts: dict[str, str] = {}
+    for m in re.finditer(r"\bString\s+(\w+)\s*=\s*((?:\"(?:\\.|[^\"\\])*\"|\w+|\s|\+)+);", text):
+        val = _java_eval(m.group(2), consts)
+        if val is not None:
+            consts[m.group(1)] = val
+    return consts
+
+
+def _java_eval(expr: str, consts: dict[str, str]) -> str | None:
+    parts = re.findall(r"\"((?:\\.|[^\"\\])*)\"|(\w+)", expr)
+    if not parts:
+        return None
+    out = ""
+    for lit, name in parts:
+        if name:
+            if name not in consts:
+                return None
+            out += consts[name]
+        else:
+            out += lit
+    return out
+
+
+def _java_paths(args: str, consts: dict[str, str] | None = None) -> list[str]:
+    """The path values of a mapping annotation: ("/a"), (value = "/a"), (path = {"/a", "/b"}), (BASE + "/a"); none means the class prefix itself."""
+    args = _NON_PATH_ATTRS.sub("", args).strip().strip(",")
+    args = re.sub(r"^\s*(?:value|path)\s*=\s*", "", args).strip()
+    if args.startswith("{") and args.endswith("}"):
+        args = args[1:-1]
+    paths = []
+    for item in re.findall(r"(?:\"(?:\\.|[^\"\\])*\"|[^,\"])+", args):
+        val = _java_eval(item, consts or {}) if item.strip() else None
+        if val is not None:
+            paths.append(val)
+    return paths or [""]
+
+
+def _join_path(prefix: str, path: str) -> str:
+    return "/" + "/".join(p.strip("/") for p in (prefix, path) if p and p.strip("/"))
+
+
+def _java_routes(text: str, out: list) -> None:
+    consts = _java_constants(text)
+    decl = re.search(r"(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static|sealed)\s+)*(?:class|interface)\s+\w+", text)
+    head, body = (text[:decl.start()], text[decl.start():]) if decl else ("", text)
+    prefixes = [""]
+    pm = list(re.finditer(r"@(?:RequestMapping|Path)\s*\(" + _ANNOTATION_ARGS + r"\)", head))
+    if pm:
+        prefixes = _java_paths(pm[-1].group(1), consts)
+    # Spring: @GetMapping(...), @RequestMapping(method = RequestMethod.X ...)
+    for m in re.finditer(r"@(Get|Post|Put|Delete|Patch)Mapping\b(?:\s*\(" + _ANNOTATION_ARGS + r"\))?", body):
+        for pre in prefixes:
+            for path in _java_paths(m.group(2) or "", consts):
+                _add(out, "route", f"{_SPRING_VERBS[m.group(1)]} {_join_path(pre, path)}", m.group(0))
+    for m in re.finditer(r"@RequestMapping\b(?:\s*\(" + _ANNOTATION_ARGS + r"\))?", body):
+        args = m.group(1) or ""
+        verbs = re.findall(r"RequestMethod\.(GET|POST|PUT|DELETE|PATCH)", args) or ["ANY"]
+        for pre in prefixes:
+            for path in _java_paths(args, consts):
+                for v in verbs:
+                    _add(out, "route", f"{v} {_join_path(pre, path)}", m.group(0))
+    # JAX-RS: @GET/@POST... on a method, optionally with its own @Path (before or after the verb)
+    masked = re.sub(r"\"(?:\\.|[^\"\\\n])*\"", lambda x: '"' + " " * (len(x.group(0)) - 2) + '"', body)  # braces inside "/{id}" are not code
+    for m in re.finditer(r"@(GET|POST|PUT|DELETE|PATCH|HEAD)\b", body):
+        start = max(masked.rfind(c, 0, m.start()) for c in ";{}") + 1
+        ends = [i for i in (masked.find("{", m.end()), masked.find(";", m.end())) if i >= 0]
+        window = body[start:min(ends) if ends else m.end() + 300]
+        own = re.search(r"@Path\s*\(" + _ANNOTATION_ARGS + r"\)", window)
+        for pre in prefixes:
+            for path in (_java_paths(own.group(1), consts) if own else [""]):
+                _add(out, "route", f"{m.group(1)} {_join_path(pre, path)}", window.strip())
+
+
+def _java_symbols(text: str, out: list) -> None:
+    text = _java_strip_comments(text)
+    for m in re.finditer(r"(?m)^[ \t]*((?:@\w+(?:\s*\([^)\n]*\))?\s+)*)public\s+(?:(?:abstract|final|sealed|non-sealed|static|strictfp)\s+)*(@interface|class|interface|enum|record)\s+(\w+)", text):
+        annotations, kind, name = m.group(1), m.group(2), m.group(3)
+        if kind == "record":
+            brace = text.find("{", m.end())
+            _add(out, "export", name, text[m.start():brace] if brace >= 0 else text[m.start():m.end() + 300])
+        elif re.search(r"@(?:Entity|Embeddable|MappedSuperclass)\b", annotations):
+            _add(out, "model", name, _block_of(text, m.start()))
+        elif kind in ("interface", "enum", "@interface"):
+            _add(out, "export", name, _block_of(text, m.start()))
+        else:
+            _add(out, "export", name, text[m.start():m.end() + 160].split("{")[0])
+    for m in re.finditer(r"@Table\s*\([^)]*?\bname\s*=\s*\"([A-Za-z_]\w*)\"", text):
+        _add(out, "model", m.group(1), "")
+    _java_routes(text, out)
+    # configuration: @Value("${a.b:default}"), @ConfigurationProperties("a.b"), Environment.getProperty("a.b"), System.getenv("X")
+    for m in re.finditer(r"@Value\(\s*\"\$\{([A-Za-z_][\w.\-]*)", text):
+        _add(out, "config", m.group(1), "")
+    for m in re.finditer(r"@ConfigurationProperties\(\s*(?:(?:prefix|value)\s*=\s*)?\"([A-Za-z_][\w.\-]*)\"", text):
+        _add(out, "config", m.group(1), "")
+    for m in re.finditer(r"\b(?:getProperty|getRequiredProperty)\(\s*\"([A-Za-z_][\w.\-]*)\"", text):
+        _add(out, "config", m.group(1), "")
+
+
+def _config_file_symbols(file_path: str, text: str, out: list) -> None:
+    """Spring application.properties / application.yml: every key is a setting, and `${ENV_VAR:default}` references are environment variables."""
+    base = file_path.rsplit("/", 1)[-1]
+    if not re.match(r"(?:application|bootstrap)(?:-[\w.-]+)?\.(?:properties|ya?ml)$", base):
+        return
+    keys: list[str] = []
+    if base.endswith(".properties"):
+        keys = re.findall(r"(?m)^\s*([A-Za-z_][\w.\-\[\]]*)\s*[=:]", text)
+    else:
+        stack: list[tuple[int, str]] = []
+        for line in text.splitlines():
+            m = re.match(r"^(\s*)([A-Za-z_][\w.\-]*)\s*:(.*)$", line)
+            if not m:
+                continue
+            indent = len(m.group(1))
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            stack.append((indent, m.group(2)))
+            if m.group(3).strip() and not m.group(3).strip().startswith("#"):
+                keys.append(".".join(k for _, k in stack))
+    for k in keys:
+        _add(out, "config", k, "")
+    for m in re.finditer(r"\$\{([A-Z][A-Z0-9_]{2,})", text):
+        _add(out, "config", m.group(1), "")
+
+
 def extract_public_symbols(file_path: str, text: str) -> list[dict]:
     out: list[dict] = []
     ext = (file_path.rsplit(".", 1)[-1] if "." in file_path else "").lower()
     is_js = bool(re.match(r"^(js|jsx|mjs|cjs|ts|tsx)$", ext)) or not file_path
-    is_go, is_py = ext == "go", ext == "py"
+    is_go, is_py, is_java = ext == "go", ext == "py", ext == "java"
 
     if is_js:
         for m in re.finditer(r"(?m)^\s*export\s+(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*(\([^)]*\))?", text):
@@ -94,6 +232,10 @@ def extract_public_symbols(file_path: str, text: str) -> list[dict]:
             _add(out, "export", m.group(1), m.group(0))
         for m in re.finditer(r"@(?:app|router|bp|blueprint)\.(?:route|get|post|put|patch|delete)\(\s*['\"](/[^'\"]*)['\"]", text):
             _add(out, "route", m.group(1), m.group(0))
+    if is_java:
+        _java_symbols(text, out)
+    elif ext in ("properties", "yml", "yaml"):
+        _config_file_symbols(file_path, text, out)
     # Schemas and contracts, any extension
     for m in re.finditer(r"(?m)^model\s+([A-Za-z_]\w*)\s*\{", text):
         _add(out, "model", m.group(1), _block_of(text, m.start()))
