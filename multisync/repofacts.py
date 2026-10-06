@@ -44,6 +44,14 @@ GO_NOTABLE = {
 }
 PY_NOTABLE = {"fastapi": "FastAPI", "flask": "Flask", "django": "Django", "langgraph": "LangGraph", "httpx": "httpx", "psycopg": "psycopg (PostgreSQL)", "pytest": "pytest",
               "pydantic": "Pydantic", "sqlalchemy": "SQLAlchemy"}
+JAVA_NOTABLE = [
+    ("starter-webflux", "Spring WebFlux"), ("starter-webmvc", "Spring MVC"), ("starter-web", "Spring MVC"), ("starter-data-jpa", "Spring Data JPA"),
+    ("starter-security", "Spring Security"), ("oauth2-client", "OAuth2 login"), ("oauth2-resource-server", "OAuth2 resource server"),
+    ("starter-thymeleaf", "Thymeleaf"), ("starter-validation", "Bean Validation"), ("starter-actuator", "Spring Actuator"),
+    ("flyway", "Flyway migrations"), ("liquibase", "Liquibase migrations"), ("postgresql", "PostgreSQL"), ("mysql", "MySQL"), ("h2", "H2"),
+    ("mongodb", "MongoDB"), ("redis", "Redis"), ("kafka", "Kafka"), ("amqp", "RabbitMQ"), ("springdoc", "springdoc OpenAPI"), ("lombok", "Lombok"),
+    ("testcontainers", "Testcontainers"), ("htmx", "htmx"), ("bootstrap", "Bootstrap"), ("stripe", "Stripe"), ("mybatis", "MyBatis"), ("jooq", "jOOQ"),
+]
 
 
 def _fact(category: str, fact: str, evidence: str, source_path: str, source: str = "deterministic") -> dict:
@@ -54,6 +62,57 @@ def _fact(category: str, fact: str, evidence: str, source_path: str, source: str
 def _human_list(items: list[str]) -> str:
     items = [i for i in items if i]
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1] if items else ""
+
+
+def _java_notable(artifacts: list[str]) -> list[str]:
+    labels: list[str] = []
+    for key, label in JAVA_NOTABLE:
+        if any(key in a for a in artifacts) and label not in labels and not (label == "Spring MVC" and "Spring WebFlux" in labels and key == "starter-web"):
+            labels.append(label)
+    return labels
+
+
+def parse_maven(text: str) -> dict:
+    """{'group','artifact','version','java','boot','deps'} from a pom.xml, read lexically (no XML parser: poms are often malformed in templates)."""
+    text = re.sub(r"(?s)<!--.*?-->", "", text)
+    parent = re.search(r"(?s)<parent>(.*?)</parent>", text)
+    p_art = re.search(r"<artifactId>\s*([^<\s]+)\s*</artifactId>", parent.group(1)) if parent else None
+    p_ver = re.search(r"<version>\s*([^<\s]+)\s*</version>", parent.group(1)) if parent else None
+    boot = p_ver.group(1) if p_art and "spring-boot-starter-parent" in p_art.group(1) and p_ver else None
+    own = text
+    for tag in ("parent", "dependencyManagement", "dependencies", "build", "profiles", "pluginRepositories", "repositories", "reporting"):
+        own = re.sub(rf"(?s)<{tag}>.*?</{tag}>", "", own)
+    grab = lambda t: (re.search(rf"<{t}>\s*([^<\s]+)\s*</{t}>", own) or [None, None])[1]
+    java = next((m.group(1) for k in ("java.version", "maven.compiler.release", "maven.compiler.source", "maven.compiler.target")
+                 if (m := re.search(rf"<{re.escape(k)}>\s*([^<\s]+)\s*</{re.escape(k)}>", text))), None)
+    if not boot and (m := re.search(r"<spring-boot\.version>\s*([^<\s]+)\s*<", text)):
+        boot = m.group(1)
+    deps = re.findall(r"(?s)<dependencies>(.*?)</dependencies>", re.sub(r"(?s)<(?:dependencyManagement|build|profiles)>.*?</(?:dependencyManagement|build|profiles)>", "", text))
+    artifacts = re.findall(r"<artifactId>\s*([^<\s]+)\s*</artifactId>", " ".join(deps))
+    return {"group": grab("groupId"), "artifact": grab("artifactId"), "version": grab("version"), "java": java, "boot": boot, "deps": _java_notable(artifacts)}
+
+
+def parse_gradle(text: str) -> dict:
+    text = re.sub(r"(?s)/\*.*?\*/", "", re.sub(r"(?m)//.*$", "", text))
+    java = next((m.group(1) for pat in (r"JavaLanguageVersion\.of\(\s*(\d+)", r"JavaVersion\.VERSION_(\d+(?:_\d+)?)", r"(?:sourceCompatibility|targetCompatibility)\s*=\s*['\"]?(\d+(?:\.\d+)?)",
+                                          r"jvmToolchain\(\s*(\d+)") if (m := re.search(pat, text))), None)
+    boot = (re.search(r"org\.springframework\.boot['\"]\)?\s*version\s*['\"]([^'\"]+)", text) or re.search(r"springBootVersion\s*=\s*['\"]([^'\"]+)", text) or [None, None])[1]
+    group = (re.search(r"(?m)^\s*group\s*=?\s*['\"]([^'\"]+)", text) or [None, None])[1]
+    version = (re.search(r"(?m)^\s*version\s*=?\s*['\"]([^'\"]+)", text) or [None, None])[1]
+    artifacts = [m[1] for m in re.findall(r"['\"]([\w.\-]+):([\w.\-]+)(?::[^'\"]*)?['\"]", text)]
+    return {"group": group, "artifact": None, "version": version, "java": java.replace("_", ".") if java else None, "boot": boot, "deps": _java_notable(artifacts)}
+
+
+def _jvm_fact(path: str, info: dict, tool: str) -> str:
+    ident = ":".join(x for x in (info["group"], info["artifact"]) if x)
+    fact = f"{path} is a {tool} build" + (f" for {ident}" if ident else "")
+    if info["java"]:
+        fact += f" targeting Java {info['java']}"
+    if info["boot"]:
+        fact += f", on Spring Boot {info['boot']}"
+    if info["deps"]:
+        fact += f", with {_human_list(info['deps'])}"
+    return fact + "."
 
 
 def sha256(text: str) -> str:
@@ -140,6 +199,11 @@ def deterministic_facts(repo: str, files: list[str], read) -> list[dict]:
         if deps:
             fact += f", with notable dependencies {_human_list(deps)}"
         out.append(_fact("stack", fact + ".", gm, gm))
+    # Java: Maven and Gradle
+    for pom in [f for f in files if f == "pom.xml" or f.endswith("/pom.xml")][:2]:
+        out.append(_fact("stack", _jvm_fact(pom, parse_maven(read(pom) or ""), "Maven"), pom, pom))
+    for gr in [f for f in files if re.search(r"(^|/)build\.gradle(\.kts)?$", f)][:2]:
+        out.append(_fact("stack", _jvm_fact(gr, parse_gradle(read(gr) or ""), "Gradle"), gr, gr))
     # Node
     for pj in [f for f in files if f.endswith("package.json") and "node_modules" not in f][:3]:
         try:
@@ -181,7 +245,7 @@ def deterministic_facts(repo: str, files: list[str], read) -> list[dict]:
     routes, configs = [], []
     for f in select_files(files):
         raw = read(f)
-        if raw is None or len(raw) > 200_000 or "\u0000" in raw:
+        if raw is None or len(raw) > 200_000 or "\u0000" in raw or re.match(r"(?:mvnw|gradlew)(?:\.cmd|\.bat)?$", os.path.basename(f)):
             continue
         for sym in extract_public_symbols(f, raw):
             if sym["kind"] == "route" and sym["name"] not in routes:
@@ -191,14 +255,14 @@ def deterministic_facts(repo: str, files: list[str], read) -> list[dict]:
     if routes:
         out.append(_fact("api", f"The code registers {len(routes)} HTTP route(s), for example {_human_list(routes[:4])}.", "route registrations found in source files", "@source-files"))
     if configs:
-        out.append(_fact("config", f"The code reads {len(configs)} environment variable(s): {', '.join(configs[:8])}{', ...' if len(configs) > 8 else ''}.", "environment variable reads found in source files", "@source-files"))
+        out.append(_fact("config", f"The code reads {len(configs)} environment variable(s) or configuration key(s): {', '.join(configs[:8])}{', ...' if len(configs) > 8 else ''}.", "environment variable reads found in source files", "@source-files"))
     return out
 
 
 # ── deterministic signals, used to cross-check README-derived facts ─────────────
 def deterministic_signals(files: list[str], read) -> dict:
     """{'go': '1.24.2', 'frameworks': {'Next.js': '16'}, 'top_language': 'TypeScript', 'mix': {'TypeScript': 54, 'Go': 41}}"""
-    sig: dict = {"go": None, "frameworks": {}, "top_language": None, "mix": {}}
+    sig: dict = {"go": None, "java": None, "frameworks": {}, "top_language": None, "mix": {}}
     gm = next((f for f in files if f == "go.mod" or f.endswith("/go.mod")), None)
     if gm:
         m = re.search(r"(?m)^go\s+(\d+\.\d+(?:\.\d+)?)", read(gm) or "")
@@ -212,6 +276,13 @@ def deterministic_signals(files: list[str], read) -> dict:
             v = re.search(r"(\d+)", str(deps.get(key, "")))
             if v and key not in ("typescript", "prisma", "@prisma/client", "@trpc/server"):
                 sig["frameworks"].setdefault(label, v.group(1))
+    jvm = next((parse_maven(read(f) or "") for f in files if f == "pom.xml" or f.endswith("/pom.xml")), None) or \
+        next((parse_gradle(read(f) or "") for f in files if re.search(r"(^|/)build\.gradle(\.kts)?$", f)), None)
+    if jvm:
+        sig["java"] = (re.match(r"\d+", jvm["java"] or "") or [None])[0] if jvm["java"] else None
+        boot = re.match(r"\d+", jvm["boot"] or "")
+        if boot:
+            sig["frameworks"].setdefault("Spring Boot", boot.group(0))
     size: dict[str, int] = defaultdict(int)
     for f in select_files(files):
         lang = LANGUAGES.get(f.rsplit(".", 1)[-1].lower()) if "." in f else None
@@ -227,7 +298,7 @@ def deterministic_signals(files: list[str], read) -> dict:
 
 
 _LANG_NAMES = {v.lower(): v for v in LANGUAGES.values()} | {"golang": "Go", "node": "JavaScript", "node.js": "JavaScript"}
-_FW_PATTERN = "|".join(re.escape(x) for x in ("Next.js", "React", "Vue", "Svelte", "Astro", "Tailwind CSS", "Tailwind", "Express", "Vite"))
+_FW_PATTERN = "|".join(re.escape(x) for x in ("Next.js", "React", "Vue", "Svelte", "Astro", "Tailwind CSS", "Tailwind", "Express", "Vite", "Spring Boot"))
 
 
 def conflicts(fact: dict, sig: dict) -> str | None:
@@ -238,6 +309,10 @@ def conflicts(fact: dict, sig: dict) -> str | None:
         for v in re.findall(r"\bGo\s*v?(\d+\.\d+)", text):
             if v != ".".join(sig["go"].split(".")[:2]):
                 return f"the README mentions Go {v} but go.mod declares Go {sig['go']}"
+    if sig.get("java"):
+        for v in re.findall(r"\b(?:Java|JDK)\s*v?(\d+)\b", text):
+            if v != sig["java"]:
+                return f"the README mentions Java {v} but the build declares Java {sig['java']}"
     m = re.search(r"(?i)\b(?:mainly|primarily|mostly|predominantly|largely)\s+(?:written\s+in\s+|developed\s+(?:in|using)\s+)?([A-Za-z+#.]+)", text) or \
         re.search(r"(?i)\bwritten\s+(?:entirely\s+|mostly\s+)?in\s+([A-Za-z+#.]+)", text)
     if m and sig.get("top_language"):
