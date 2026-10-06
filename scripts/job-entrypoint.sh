@@ -126,6 +126,8 @@ else
 fi
 PR_URL=$(gh pr view "$BR" --repo "$CENTRAL_REPO" --json url -q .url)
 echo "PR: $PR_URL"
+# Older open drafts of this repository that this one replaces are closed (and marked, so they are not logged as rejected reviews).
+PR_NUMBER=$(gh pr view "$BR" --repo "$CENTRAL_REPO" --json number -q .number) python -m multisync.cli.supersede || true
 
 step "review ticket"
 export PR_URL ENVIRONMENT=${REVIEW_ENVIRONMENT_NAME:-QA}

@@ -228,3 +228,61 @@ def test_a_decision_stored_before_these_features_existed_is_skipped_never_given_
     result = record(facts, gh, 7, "https://x/pull/7", "ruben", "2026-10-05T12:00:00Z", merged=False)
     assert result["rows"] == 0 and result["inserted"] == 0 and any("predates review-outcome features" in x for x in result["skipped"])
     assert getattr(facts, "review_outcomes", []) == []
+
+
+# ── a newer sync supersedes older open drafts of the same repository ──────────
+class FakeRepo:
+    """The pull-request side of GitHub, enough for supersede_older."""
+
+    def __init__(self, prs):
+        self.prs = prs  # number -> {"ref": ..., "files": [...], "body": ...}
+        self.closed, self.bodies, self.comments = [], {}, []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path, body = request.url.path, (json.loads(request.content) if request.content else {})
+        if path.endswith("/pulls") and request.method == "GET":
+            return httpx.Response(200, json=[{"number": n, "head": {"ref": p["ref"]}, "body": p.get("body", "")} for n, p in self.prs.items() if n not in self.closed])
+        if path.endswith("/files"):
+            n = int(path.split("/")[-2])
+            return httpx.Response(200, json=[{"filename": f} for f in self.prs[n]["files"]])
+        if "/issues/" in path and path.endswith("/comments"):
+            self.comments.append((int(path.split("/")[-2]), body["body"]))
+            return httpx.Response(201, json={})
+        if "/pulls/" in path and request.method == "PATCH":
+            n = int(path.split("/")[-1])
+            if "body" in body:
+                self.bodies[n] = body["body"]
+            if body.get("state") == "closed":
+                self.closed.append(n)
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+
+def supersede_world(prs):
+    from multisync.review_outcomes import GitHub as GH
+    fake = FakeRepo(prs)
+    return fake, GH("o/docs", "tok", httpx.MockTransport(fake.handler))
+
+
+def test_a_newer_draft_closes_older_ones_of_the_same_repo_whose_pages_it_covers_and_leaves_the_rest():
+    from multisync.review_outcomes import SUPERSEDED_MARKER, supersede_older
+    page = "src/content/docs/services/x/overview.md"
+    other = "src/content/docs/services/x/api.md"
+    fake, gh = supersede_world({
+        24: {"ref": "docs-sync/o-src-1111111", "files": [page, other]},
+        23: {"ref": "docs-sync/o-src-2222222", "files": [page]},                       # covered: closed
+        22: {"ref": "docs-sync/o-src-3333333", "files": [page, other]},                # covered: closed
+        21: {"ref": "docs-sync/o-src-4444444", "files": ["src/content/docs/services/x/data.md"]},  # a page the new one lacks: kept
+        20: {"ref": "docs-sync/o-src-extra-5555555", "files": [page]},                 # another repository whose name starts the same: untouched
+        19: {"ref": "feature/not-ours", "files": [page]},
+    })
+    res = supersede_older(gh, 24, "o/src", "qa")
+    assert sorted(res["closed"]) == [22, 23] and [n for n, _ in res["kept"]] == [21]
+    assert sorted(fake.closed) == [22, 23] and all(SUPERSEDED_MARKER in fake.bodies[n] for n in (22, 23))
+    assert all("Superseded by #24" in c for _, c in fake.comments) and len(fake.comments) == 2
+
+
+def test_a_superseded_pull_request_is_not_logged_as_a_rejected_review():
+    gh, _ = fake_github([], {}, body=BODY + "\n<!-- multisync:superseded -->")
+    rows, skipped = collect_rows(store_with_decisions(), gh, 7, "https://x/pull/7", "ruben", "2026-10-05T12:00:00Z", merged=False)
+    assert rows == [] and "newer draft replaced it" in skipped[0]
