@@ -117,3 +117,44 @@ def test_cli_a_protected_target_branch_forces_review_even_for_a_trust_auto_repo(
         assert json.loads((tmp_path / "pipeline-results.json").read_text())["results"][0]["outcome"] == "pending_review"
     finally:
         fake.close()
+
+
+def sensitive_repo(tmp_path, extra_config=None):
+    src = tmp_path / "source-repo"
+    init_repo(src)
+    (src / "src/a.go").write_text(A_V1)
+    (src / "NOTES.md").write_text("---\nclassification: Oracle Restricted\n---\ninternal planning notes\n")
+    c1 = commit(src, "one")
+    (src / "src/a.go").write_text(A_V2)
+    c2 = commit(src, "two")
+    entry = {"mode": "code", "trust": "auto", "serviceName": "proj", "pages": [{"path": "api.md", "kind": "API documentation", "scope": ["**"], "brief": "The API."}], **(extra_config or {})}
+    return src, c1, c2, {"repos": {"o/proj": entry}}
+
+
+def test_a_repository_with_a_sensitive_file_in_scope_is_blocked_before_anything_is_embedded_or_sent(tmp_path):
+    fake = FakeOpenAI()
+    try:
+        src, c1, c2, repos = sensitive_repo(tmp_path)
+        env = base_env(tmp_path, fake.url, repos, SOURCE_SHA=c2, SOURCE_BEFORE=c1)
+        code, out = run_cli(tmp_path, env)
+        assert code == 0, out
+        assert "onboarding blocked, nothing is embedded or sent to a model" in out
+        d = json.loads((tmp_path / "pipeline-results.json").read_text())["results"][0]
+        assert d["outcome"] == "fallback" and d["rootCauseTag"] == "onboarding_blocked" and "look sensitive" in d["reason"] and "NOTES.md" in d["reason"]
+        assert fake.hits["embed"] == 0 and fake.hits["chat"] == 0, "no text left the machine"
+        assert not (tmp_path / "site").exists()
+    finally:
+        fake.close()
+
+
+def test_the_owner_can_acknowledge_a_sensitive_looking_file_and_the_run_proceeds(tmp_path):
+    fake = FakeOpenAI()
+    try:
+        src, c1, c2, repos = sensitive_repo(tmp_path, {"allowSensitive": ["NOTES.md"]})
+        env = base_env(tmp_path, fake.url, repos, SOURCE_SHA=c2, SOURCE_BEFORE=c1)
+        code, out = run_cli(tmp_path, env)
+        assert code == 0 and "onboarding blocked" not in out, out
+        assert json.loads((tmp_path / "pipeline-results.json").read_text())["results"][0]["outcome"] == "published"
+        assert fake.hits["embed"] >= 1
+    finally:
+        fake.close()

@@ -89,6 +89,8 @@ def plan_onboarding(repo: str, policy, git, commit: str, styles: dict | None = N
             warnings.append(f"page {page['path']}: style \"{style['key']}\" enforces coverage but no declared names were found in scope (is the scope right?)")
         pages.append(row)
 
+    # The owner can acknowledge a file that only mentions a sensitive word (an example in a README) with `allowSensitive: ["path", ...]` in the repo's config.
+    sensitive -= set(policy.get("allowSensitive") or [])
     if len({p["path"] for p in pages}) != len(pages):
         blockers.append("two pages share the same path")
     if sensitive:
