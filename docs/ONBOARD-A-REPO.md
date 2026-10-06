@@ -48,7 +48,9 @@ python -m multisync.cli.onboard_check --repo owner/name --dir /path/to/checkout
 ```
 
 It prints what would be loaded (code files and chunks, documentation files, what is excluded), an embedding cost estimate,
-and for each page how many in-scope files fit the snapshot. It blocks on: no config entry, a page whose scope matches no
+and for each page how many in-scope files fit the snapshot. **The blockers are enforced, not only advised.** Every run repeats this check before anything is embedded: a repository with a blocker is not sent to any model, every page falls back with a `onboarding_blocked` ticket, and nothing is published until the owner excludes the file or acknowledges it with `"allowSensitive": ["path"]` in the repo's entry (for example a README that only mentions the word "restricted" in an example).
+
+It blocks on: no config entry, a page whose scope matches no
 files, duplicate page paths, and files that look sensitive (secret-type paths, "restricted/confidential" markers in notes).
 It warns about: missing briefs or glossary, `trust: auto`, an unknown style, files with secret-looking lines (those lines are
 removed before embedding), and pages that cannot see most of their scope.
