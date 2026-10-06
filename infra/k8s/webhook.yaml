@@ -115,7 +115,7 @@ spec:
           command: ["python", "-m", "multisync.webhook"]
           ports: [{ containerPort: 8080 }]
           env:
-            - { name: ALLOWED_REPOS, value: "cAImanLabs/cAImanLabsCalendarScheduler,cAImanLabs/hermes-operations-console,cAImanLabs/socialmedia-ai-e2e-pipelines,rubenalejandrocalderoncorona/agent-trace-lint,rubenalejandrocalderoncorona/ai-multisync-tool,rubenalejandrocalderoncorona/raibis-lifeos,rubenalejandrocalderoncorona/rurag,rubenalejandrocalderoncorona/SuperGit,rubenalejandrocalderoncorona/flare-optimizer-v2" }   # source repos that may trigger a sync (keep in step with config/repos.json)
+            - { name: ALLOWED_REPOS, value: "cAImanLabs/cAImanLabsCalendarScheduler,cAImanLabs/hermes-operations-console,cAImanLabs/socialmedia-ai-e2e-pipelines,rubenalejandrocalderoncorona/agent-trace-lint,rubenalejandrocalderoncorona/ai-multisync-tool,rubenalejandrocalderoncorona/raibis-lifeos,rubenalejandrocalderoncorona/rurag,rubenalejandrocalderoncorona/SuperGit,rubenalejandrocalderoncorona/flare-optimizer-v2,Fidavia/fidavia,Fidavia/fidavia-frontend" }   # source repos that may trigger a sync (keep in step with config/repos.json)
             - { name: CENTRAL_REPO, value: "rubenalejandrocalderoncorona/multirepo-agent-docs" }
             - { name: TARGET_BRANCH, value: "qa" }
             - { name: JOB_IMAGE, value: "__PIPELINE_IMAGE__" }
