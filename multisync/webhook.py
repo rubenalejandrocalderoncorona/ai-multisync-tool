@@ -58,6 +58,8 @@ class Config:
         self.secret_name = env.get("JOB_SECRET", "multisync-secrets")
         self.qdrant_url = env.get("QDRANT_URL", "http://qdrant:6333")
         self.namespace = env.get("NAMESPACE", "")
+        # A first sync of a repository with many pages runs them one after the other (minutes each, up to six attempts per page).
+        self.job_deadline = min(max(int(env.get("JOB_DEADLINE_SECONDS", "7200") or 7200), 600), 14400)
         self.deploy_workflow = env.get("DEPLOY_WORKFLOW", "Documentation site")
         self.deploy_sa = env.get("DEPLOY_SERVICE_ACCOUNT", "multisync-docs-deployer")
         self.prod_branch = env.get("PROD_BRANCH", "main")
@@ -122,9 +124,11 @@ def plan(cfg: Config, event: str, p: dict) -> tuple[dict | None, str]:
             return None, "not the default branch"
         files = [f for c in p.get("commits") or [] for f in [*(c.get("added") or []), *(c.get("modified") or [])]]
         before = p.get("before", "")
-        if not SHA_RE.match(before) or ZERO_RE.match(before):
+        first = not SHA_RE.match(before) or bool(ZERO_RE.match(before))  # a push that creates the branch: nothing to diff against
+        if first:
             before = ""
-        return {"mode": "sync", "source_repo": full_name, "sha": after, "before": before, "target": cfg.target_branch, "files": clean_files(files)}, ""
+        # `full`: the first push of a repository documents everything in scope (otherwise the run would diff against HEAD~1 and see one commit)
+        return {"mode": "sync", "source_repo": full_name, "sha": after, "before": before, "target": cfg.target_branch, "files": clean_files(files), "full": first}, ""
     if event == "repository_dispatch":
         cp = p.get("client_payload") or {}
         repo = cp.get("repository") or full_name
@@ -197,6 +201,8 @@ def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
     env = [e("JOB_MODE", j["mode"]), e("SOURCE_REPO", j["source_repo"]), e("SOURCE_SHA", j["sha"]), e("SOURCE_BEFORE", j["before"]), e("TARGET_BRANCH", j["target"]),
            e("CHANGED_FILES", "\n".join(j["files"])), e("CENTRAL_REPO", cfg.central), e("BASE_SHA", j.get("base_sha", "")), e("MERGE_SHA", j.get("merge_sha", "")),
            e("QDRANT_URL", cfg.qdrant_url), e("HOME", "/work")]
+    if j.get("full"):
+        env.append(e("FULL_SYNC", "1"))
     pr = j.get("pr")
     if pr:  # review-outcome logging (modes index and review)
         env += [e("PR_NUMBER", str(pr["number"] or "")), e("PR_URL", pr["url"]), e("PR_MERGED", "true" if pr["merged"] else "false"), e("REVIEWED_BY", pr["by"]), e("REVIEWED_AT", pr["at"])]
@@ -206,7 +212,7 @@ def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": {"name": name, "namespace": cfg.namespace, "labels": {"app": "multisync-job", "multisync/mode": j["mode"]}},
         "spec": {
-            "ttlSecondsAfterFinished": 300, "backoffLimit": 1, "activeDeadlineSeconds": 1800,
+            "ttlSecondsAfterFinished": 300, "backoffLimit": 1, "activeDeadlineSeconds": cfg.job_deadline,
             "template": {
                 "metadata": {"labels": {"app": "multisync-job"}},
                 "spec": {

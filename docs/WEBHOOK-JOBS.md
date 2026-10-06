@@ -22,6 +22,8 @@ flowchart LR
 | `workflow_run` completed | central repo, workflow "Documentation site", success, event push, branch `qa` or `main` | `deploy` | the docs site image `ghcr.io/<central>:<env>-<sha12>` is rolled out to `docs-qa` / `docs-prod` |
 | `ping` | any signed | none | `pong` |
 
+A `push` whose `before` is all zeros (the push that creates the default branch, or a replayed first sync) starts the Job with `FULL_SYNC=1`, so every declared page is written, not only those touched by the last commit. The Job's deadline is `JOB_DEADLINE_SECONDS` (default 7200, at most 14400): pages run one after the other.
+
 Anything unsigned or with a wrong signature gets `401`; a signed event that does not qualify gets `200 ignored: <why>`. All payload fields are
 validated against strict patterns and reach the Job only as environment variables.
 

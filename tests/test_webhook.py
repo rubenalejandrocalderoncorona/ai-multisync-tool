@@ -47,6 +47,23 @@ def test_plan_push():
     assert plan(cfg(), "issues", PUSH)[0] is None
 
 
+def test_first_push_of_a_branch_is_a_full_sync_an_ordinary_push_is_not():
+    j, _ = plan(cfg(), "push", {**PUSH, "before": "0" * 40})
+    assert j["full"] is True and j["before"] == ""
+    env = {e["name"]: e["value"] for e in job_manifest(cfg(), {**j, "mode": "sync"}, now=1)["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["FULL_SYNC"] == "1"
+    j2, _ = plan(cfg(), "push", {**PUSH, "before": "a" * 40})
+    assert j2["full"] is False
+    env2 = {e["name"] for e in job_manifest(cfg(), {**j2, "mode": "sync"}, now=1)["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert "FULL_SYNC" not in env2
+
+
+def test_job_deadline_default_is_two_hours_and_configurable_within_bounds():
+    m = job_manifest(cfg(), {"mode": "sync", "source_repo": "a/b", "sha": "ABCDEF123456", "before": "", "target": "qa", "files": []}, now=1)
+    assert m["spec"]["activeDeadlineSeconds"] == 7200
+    assert Config({"JOB_DEADLINE_SECONDS": "99999"}, secret="x" * 20).job_deadline == 14400
+
+
 def test_plan_dispatch_and_pr():
     j, why = plan(cfg(), "repository_dispatch", {"client_payload": {"repository": "cAImanLabs/Calendar", "sha": "abc1234", "target_branch": "staging", "changed_files": "docs/a.md docs/b.md"}})
     assert j and j["target"] == "staging" and len(j["files"]) == 2, why
