@@ -111,13 +111,13 @@ The bot never approves, dismisses or merges: the reviewer re-reviews. Nothing is
 | Webhook `pull_request` closed, merged, head `docs-sync/*` | receiver | starts the `index` Job |
 | `index` Job | cluster | embeds the merged pages as approved docs (replaces old chunks, deletes removed pages); then `record_review` |
 | `record_review` | cluster | one `review_outcomes` row per page: `draft_with_noedition` (merged unchanged), `draft_with_edition` (merged edited), reviewer and time; 10 % of unchanged ones are sampled for a second-person audit. A page whose stored decision lacks classification, tier or policy version is skipped, never guessed. |
-| Actions workflow `qa` job | GitHub | notes the ticket "deployed to QA"; opens or extends the rolling `qa` to `main` promotion PR (bot token once the Actions secrets exist) |
+| Actions workflow `qa` job | GitHub | notes the ticket "approved and deployed to QA" and **closes it** (approving means merging); opens or extends the rolling `qa` to `main` promotion PR (bot token once the Actions secrets exist) |
 | `docs-site` workflow, then `workflow_run` webhook | GitHub, receiver | builds the image, starts a `deploy` Job that rolls out `docs-qa` |
 
 A review PR closed **unmerged** starts a `review` Job: logs `draft_rejected` rows (unless superseded) and notes the ticket; nothing is indexed.
 
 ## 8. Promotion to production
-A human approves and merges the promotion PR into `main`. The workflow closes every ticket named in it; the docs-site build and a `deploy` Job roll out `docs-prod`.
+A human approves and merges the promotion PR into `main`. The workflow adds a "deployed to production" note to every ticket named in it (they were already closed at the QA merge); the docs-site build and a `deploy` Job roll out `docs-prod`.
 
 ## 9. Metrics (read-only)
 `multisync metrics review-readiness --segment CLASS:TIER` gives the Wilson lower bound of the no-edit rate (needs at least 30 reviews and a lower bound of 0.85). `audit-gap` compares audited accuracy to the raw no-edit rate. Nothing reads these to approve anything; `auto_approval_eligible` stays false.
