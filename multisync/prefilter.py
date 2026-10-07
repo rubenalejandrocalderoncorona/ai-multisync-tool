@@ -8,10 +8,18 @@ from .symbols import diff_public_symbols
 def prefilter(before: str, after: str, min_diff_lines: int) -> dict:
     """{proceed, forced, reason, tag?, metrics}"""
     diff = diff_line_count(before, after)
+    structure = structural_change(before, after)
     if diff["total"] < min_diff_lines:
+        # A tiny diff is usually noise, but ONE line can change a documented fact (a limit, a default, a status code, a route). When the change
+        # carries fact tokens, a public symbol or a shape change it is processed anyway, and forced so the "page already says this" stop cannot
+        # swallow it (an embedding barely moves for 50 -> 100). Pure wording of fewer than the minimum lines is still dropped.
+        pub_small = diff_public_symbols(before, after)
+        if structure["changed"] or pub_small["touched"]:
+            what = ", ".join(structure["reasons"] or ["public interface"])
+            return {"proceed": True, "forced": True, "reason": f"small diff ({diff['total']} line(s)) that changes documented facts: {what}",
+                    "metrics": {"diff": diff, "structure": structure, "smallFactChange": True}}
         return {"proceed": False, "forced": False, "reason": f"diff of {diff['total']} line(s) is below the {min_diff_lines}-line minimum",
                 "tag": "trivial_diff", "metrics": {"diff": diff}}
-    structure = structural_change(before, after)
     # A changed public signature, route, schema field or config key is a real change even when no function was added or removed
     # (the structural check only sees names and counts).
     pub = diff_public_symbols(before, after)
