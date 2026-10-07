@@ -111,6 +111,16 @@ fi
 mapfile -t REV < <(jq -r '.results[] | select(.outcome=="pending_review" and .action!="none") | .targetPath' pipeline-results.json)
 if [ "${#REV[@]}" -eq 0 ]; then echo "nothing needs review"; python -m multisync.cli.generate_summary || true; exit 0; fi
 
+# Review PRs are opened by the GitHub App bot, not by the owner's PAT, so a human can approve them (an author cannot approve their own PR).
+if [ -n "${BOT_APP_ID:-}" ] && [ -n "${BOT_APP_PRIVATE_KEY:-}" ] && BOT_TOKEN=$(python -m multisync.cli.app_token); then
+  export GH_TOKEN=$BOT_TOKEN GITHUB_TOKEN=$BOT_TOKEN
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$BOT_TOKEN" | base64 | tr -d '\n')"
+  export GIT_CONFIG_VALUE_0
+  echo "review PR will be opened by the GitHub App bot"
+else
+  echo "WARNING: no bot token (BOT_APP_ID/BOT_APP_PRIVATE_KEY missing or invalid); the PR is opened with DOCS_SYNC_PAT and cannot be approved by its owner" >&2
+fi
+
 SHORT=${SHA:0:7}
 BR="docs-sync/$(echo "$SOURCE_REPO" | tr '/' '-')-$SHORT"
 git checkout -q -B "$BR"
