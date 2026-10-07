@@ -111,6 +111,10 @@ def load_config(env: Mapping[str, str] | None = None) -> AttrDict:
             "codeTopK": _num(g("CODE_TOP_K"), 12),
             "codeTopKWidened": _num(g("CODE_TOP_K_WIDENED"), 30),
             "contextBudgetChars": _num(g("CONTEXT_BUDGET_CHARS"), 30000),
+            "patchDrafting": _num(g("PATCH_DRAFTING"), 1),  # 0 turns section-patch drafting off (always rewrite the whole page)
+            "patchMaxChangedSectionShare": _num(g("PATCH_MAX_CHANGED_SECTION_SHARE"), 0.5),  # patch_too_broad above this share of sections ...
+            "patchSmallChangeLines": _num(g("PATCH_SMALL_CHANGE_LINES"), 20),  # ... when the source diff is at most this many lines
+            "patchGuardMinSections": _num(g("PATCH_GUARD_MIN_SECTIONS"), 4),  # pages with fewer sections are not guarded
             "contextMinScore": _num(g("CONTEXT_MIN_SCORE"), 0.45),  # retrieved chunks below this cosine score are dropped
         },
         "paths": {

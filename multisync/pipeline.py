@@ -26,6 +26,7 @@ from typing import Annotated, Any, TypedDict
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from . import patching
 from . import prompts as P
 from . import tracing
 from . import writer as W
@@ -41,7 +42,8 @@ from .repofacts import checked_repo_facts, facts_text, known_fact_lines
 from .stages import analyze_code, plan_docs, plan_text, sheet_text
 from .symbols import public_symbols
 from .util import iso_now
-from .verify import verify_draft
+from .structure import diff_line_count
+from .verify import PATCH_TOO_BROAD, verify_draft
 
 GROUNDED_ONLY_TAGS = {"style_mismatch", "judge_low_confidence"}
 
@@ -80,6 +82,8 @@ class State(TypedDict, total=False):
     repoFacts: Any
     plan: Any
     decision: Any
+    patch: Any
+    patchFallback: bool
 
 
 def initial_state(change: dict) -> State:
@@ -88,6 +92,7 @@ def initial_state(change: dict) -> State:
         "knownFacts": None, "styleText": None, "iter": 0, "widened": False, "polished": False, "feedback": [], "draft": None, "verdict": None,
         "failure": None, "accepted": None, "tier": "expensive", "routeInfo": None, "escalated": False, "escalatePending": False,
         "verifyFailed": False, "garQueries": [], "relatedCode": "", "factSheet": None, "repoFacts": [], "plan": None, "decision": None,
+        "patch": None, "patchFallback": False,
     }
 
 
@@ -334,15 +339,45 @@ def process_change(change: dict, deps) -> dict:
             "update": {"hypothetical": hypothetical, "garQueries": gar["paragraphs"], "templatePath": template_path, "knownFacts": known_facts, "styleText": style_txt, "repoFacts": repo_rows},
         }
 
+    def patch_base():
+        """The existing page as the model owns it: no front matter, no Change History (code adds those). Empty when patching does not apply."""
+        # Patch mode: incremental code run (a previous snapshot exists, so not a first draft and not a forced full sync) over an existing page.
+        if mode != "code" or not t["patchDrafting"] or not change.get("before") or not (change.get("existing") or "").strip():
+            return None
+        base = patching.strip_generated(change["existing"])
+        return base if len(patching.split_sections(base)) >= 2 else None
+
     def n_write_draft(s):
         top_k = t["topKWidened"] if s["widened"] else t["topK"]
         context = _retrieve(vectors, llm, change["repo"], change["after"], s["hypothetical"], s["garQueries"], top_k)
-        out = W.draft_document(llm, mode=mode, file_path=change["filePath"], source=change["after"], existing=change.get("existing") or "", changed_files=changed_files,
-                               related_code=s["relatedCode"], fact_sheet=sheet_text(s["factSheet"]), plan=plan_text(s["plan"]), template_path=s.get("templatePath"),
-                               context=context, policy=policy, style=style, instructions=instructions, feedback=s["feedback"], tier=s["tier"])
-        return {"note": {"attempt": s["iter"] + 1, "tier": s["tier"], "escalated": s["escalated"], "widened": s["widened"], "topK": top_k, "contextChunks": len(context),
-                         "feedbackItems": len(s["feedback"]), "prompt": out["promptId"], "style": style["key"]},
-                "update": {"iter": s["iter"] + 1, "polished": False, "draft": out["text"], "escalatePending": False, "verifyFailed": False}}
+        common = dict(file_path=change["filePath"], source=change["after"], changed_files=changed_files, related_code=s["relatedCode"], fact_sheet=sheet_text(s["factSheet"]),
+                      plan=plan_text(s["plan"]), context=context, policy=policy, style=style, instructions=instructions, feedback=s["feedback"], tier=s["tier"])
+        note = {"attempt": s["iter"] + 1, "tier": s["tier"], "escalated": s["escalated"], "widened": s["widened"], "topK": top_k, "contextChunks": len(context),
+                "feedbackItems": len(s["feedback"]), "style": style["key"]}
+        base = None if s.get("patchFallback") else patch_base()
+        metrics: dict = {"patchMode": False} if mode == "code" else {}
+        patch_state = None
+        out = None
+        if base is not None:
+            sections = patching.split_sections(base)
+            try:
+                names = ((s.get("routeInfo") or {}).get("signals") or {}).get("publicChanged") or []
+                p_out = W.patch_document(llm, sections=sections, changed_symbols=names, diff_text=patching.source_diff(change.get("before"), change["after"], changed_files), **common)
+                ch = p_out["changed"]
+                n_changed = len(set(ch["replaced"]) | set(ch["deleted"]))
+                out = {"text": p_out["text"], "promptId": p_out["promptId"]}
+                patch_state = {"base": base, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "diffLines": diff_line_count(change.get("before"), change["after"])["total"]}
+                metrics = {"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed}
+                note.update({"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "inserted": len(ch["inserted"]),
+                             **({"unchangedReason": p_out["unchangedReason"]} if p_out["unchangedReason"] else {})})
+            except (patching.PatchError, ValueError) as err:
+                note.update({"patchFallback": True, "patchError": str(err)[:200]})
+                metrics = {"patchMode": False, "patchFallback": True, "sectionsTotal": None, "sectionsChanged": None, "retainedPct": None}
+        if out is None:
+            out = W.draft_document(llm, mode=mode, existing=change.get("existing") or "", template_path=s.get("templatePath"), **common)
+        update = {"iter": s["iter"] + 1, "polished": False, "draft": out["text"], "escalatePending": False, "verifyFailed": False, "patch": patch_state,
+                  **({"patchFallback": True} if note.get("patchFallback") else {}), **({"metrics": metrics} if metrics else {})}
+        return {"note": {**note, "prompt": out["promptId"]}, "update": update}
 
     def n_verify_draft(s):
         """Deterministic gate, no model call. A cheap-tier draft that fails is redone ONCE on the expensive tier (it does not use up an
@@ -358,21 +393,26 @@ def process_change(change: dict, deps) -> dict:
             names = core or [x["name"] for x in allsyms if x["kind"] == "export"]
         public_changed = names if mode == "code" else []
         plan = s.get("plan") or {}
+        patch = ({**s["patch"], "maxShare": t["patchMaxChangedSectionShare"], "smallLines": t["patchSmallChangeLines"], "minSections": t["patchGuardMinSections"]}
+                 if s.get("patch") else None)
         v = verify_draft(s["draft"], public_changed, change.get("existing") or "", change["filePath"], change.get("title") or None,
-                         plan.get("purpose") or change.get("brief") or "Generated documentation.")
+                         plan.get("purpose") or change.get("brief") or "Generated documentation.", patch=patch)
         note = {"tier": s["tier"], "ok": v["ok"], **v["metrics"], **({} if v["ok"] else {"reasons": v["reasons"][:4]})}
+        retained = {"retainedPct": v["metrics"]["retainedPct"]} if "retainedPct" in v["metrics"] else {}
         cov = None
         if v["metrics"].get("mentioned"):
             got, total = (int(x) for x in v["metrics"]["mentioned"].split("/"))
             cov = round(100.0 * got / total, 1) if total else None
         if v["ok"]:
-            return {"note": note, "update": {"verifyFailed": False, "metrics": {"symbolCoverage": cov}}}
+            return {"note": note, "update": {"verifyFailed": False, "metrics": {"symbolCoverage": cov, **retained}}}
         if s["tier"] == "cheap" and not s["escalated"]:
             return {"status": "escalate", "note": {**note, "escalatedTo": "expensive"},
                     "update": {"tier": "expensive", "escalated": True, "escalatePending": True, "feedback": v["reasons"], "iter": s["iter"] - 1}}  # the redo is free
-        attempt = {"n": s["iter"], "widened": s["widened"], "topK": t["topKWidened"] if s["widened"] else t["topK"], "failure": "deterministic_check", "tier": s["tier"]}
+        tag = PATCH_TOO_BROAD if any(r.startswith(PATCH_TOO_BROAD) for r in v["reasons"]) else "deterministic_check"
+        attempt = {"n": s["iter"], "widened": s["widened"], "topK": t["topKWidened"] if s["widened"] else t["topK"], "failure": tag, "tier": s["tier"]}
         return {"status": "rejected", "note": note,
-                "update": {"verifyFailed": True, "failure": {"tag": "deterministic_check", "feedback": v["reasons"]}, "feedback": v["reasons"], "attempts": [attempt], "accepted": None, "metrics": {"symbolCoverage": cov}}}
+                "update": {"verifyFailed": True, "failure": {"tag": tag, "feedback": v["reasons"]}, "feedback": v["reasons"], "attempts": [attempt], "accepted": None,
+                           "metrics": {"symbolCoverage": cov, **retained}}}
 
     def n_judge(s):
         judge_tier = s["tier"] if cfg["ai"]["judgeTier"] == "follow" else cfg["ai"]["judgeTier"]
@@ -387,7 +427,7 @@ def process_change(change: dict, deps) -> dict:
             total = sum(k["total"] for k in cov["kinds"].values())
             fb = f"Incomplete: {len(cov['missing'])} of {total} declared names are not documented. Add every one of: {', '.join(names)}{', ...' if len(cov['missing']) > 40 else ''}"
             failure = {**failure, "feedback": [*failure["feedback"], fb]} if failure else {"tag": "incomplete_coverage", "feedback": [fb]}
-        polishable = bool(failure and failure["tag"] in GROUNDED_ONLY_TAGS and not s["polished"])
+        polishable = bool(failure and failure["tag"] in GROUNDED_ONLY_TAGS and not s["polished"] and not s.get("patch"))
         scores = {"precision": verdict["precision"], "recall": verdict["recall"], "style": verdict["style"], "quality": verdict["quality"]}
         note = {**scores,
                 **({"coverage": {k: f"{v['found']}/{v['total']}" for k, v in cov["kinds"].items()}, "coverageMissing": cov["missing"][:8]} if cov else {}),
@@ -450,7 +490,7 @@ def process_change(change: dict, deps) -> dict:
     def after_judge(s):
         if s.get("accepted"):
             return "publish"
-        if s.get("failure") and s["failure"]["tag"] in GROUNDED_ONLY_TAGS and not s["polished"]:
+        if s.get("failure") and s["failure"]["tag"] in GROUNDED_ONLY_TAGS and not s["polished"] and not s.get("patch"):
             return "polish_draft"
         cap = t["maxIterations"] * 2 if s["widened"] else t["maxIterations"]
         if s["iter"] < cap:
