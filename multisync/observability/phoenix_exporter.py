@@ -15,6 +15,7 @@ the segment numbers change during the day, so they are ALSO written as an annota
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime, timezone
 
 from ..review_outcomes import wilson_interval
@@ -132,6 +133,34 @@ def segment_span(m: dict, now: datetime) -> dict:
             "status_code": "OK", "status_message": "", "attributes": {k: v for k, v in attrs.items() if v is not None}}
 
 
+def _log_spans(client, project: str, spans: list[dict]):
+    """Phoenix's client RAISES (SpanCreationError) when some spans already exist, instead of returning the duplicate count; that is a normal re-run."""
+    try:
+        return client.spans.log_spans(project_identifier=project, spans=spans)
+    except Exception as e:  # noqa: BLE001 - recognised by name so this module imports without the Phoenix client
+        if type(e).__name__ != "SpanCreationError":
+            raise
+        import re
+
+        m = re.search(r"Found (\d+) duplicate", str(e))
+        n = int(m.group(1)) if m else len(spans)
+        if n < len(spans):
+            raise  # some spans were rejected for another reason: never report that as a duplicate run
+        return {"total_received": len(spans), "total_queued": 0, "total_duplicates": n}
+
+
+def _retry_until_ingested(call, attempts: int = 8, delay: float = 4.0, sleep=time.sleep):
+    """Phoenix ingests spans asynchronously, so annotating a span right after logging it can answer 404. Wait for ingestion, a few times, then give up loudly."""
+    for i in range(attempts):
+        try:
+            return call()
+        except Exception as e:  # noqa: BLE001
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status != 404 or i == attempts - 1:
+                raise
+            sleep(delay)
+
+
 def _log_annotations(client, annotations: list[dict]) -> int:
     """Annotation `review_segment_metrics` on each segment span: score = Wilson lower bound, label = ready/not_ready, the numbers in metadata. Upserted by Phoenix."""
     import pandas as pd
@@ -154,7 +183,7 @@ def sync_review_evals(conn_or_factstore, phoenix_client, *, min_samples: int, th
     for spans, key in ((r_spans, "review_spans"), (s_spans, "segment_spans")):
         if not spans:
             continue
-        res = phoenix_client.spans.log_spans(project_identifier=project, spans=spans)
+        res = _log_spans(phoenix_client, project, spans)
         dup = (res or {}).get("total_duplicates", 0) if isinstance(res, dict) else 0
         result["duplicates"] += dup
         result[key] = len(spans) - dup
@@ -162,7 +191,7 @@ def sync_review_evals(conn_or_factstore, phoenix_client, *, min_samples: int, th
         notes = [{"span_id": s["context"]["span_id"], "label": "ready" if m["ready"] else "not_ready", "score": m["wilson_lower_bound"],
                   "explanation": f"n={m['n']}, no-edit rate {m['no_edition_rate']:.3f}, Wilson lower bound {m['wilson_lower_bound']:.3f} vs threshold {threshold}. Informational only.",
                   "metadata": {k: v for k, v in s["attributes"].items() if k.startswith("multisync.")}} for s, m in zip(s_spans, metrics)]
-        (annotate or _log_annotations)(phoenix_client, notes)
+        _retry_until_ingested(lambda: (annotate or _log_annotations)(phoenix_client, notes))
     return result
 
 

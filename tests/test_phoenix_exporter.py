@@ -145,3 +145,73 @@ def test_readonly_on_factstore_and_sql():
     q = Q()
     pe.sync_review_evals(q, None, min_samples=5, threshold=0.5, dry_run=True)
     assert len(q.sql) == 1 and q.sql[0].lstrip().upper().startswith("SELECT") and "auto_approval_eligible" not in q.sql[0]
+
+
+def test_a_rerun_where_phoenix_raises_on_duplicates_counts_them_instead_of_failing():
+    class Dup(Exception):
+        pass
+
+    Dup.__name__ = "SpanCreationError"
+
+    class Client:
+        class spans:
+            @staticmethod
+            def log_spans(project_identifier, spans):
+                raise Dup(f"Found {len(spans)} duplicate spans:\n  - Span x")
+
+    assert pe._log_spans(Client, "p", [{"a": 1}, {"a": 2}]) == {"total_received": 2, "total_queued": 0, "total_duplicates": 2}
+
+
+def test_a_span_creation_error_that_is_not_all_duplicates_still_fails():
+    class Dup(Exception):
+        pass
+
+    Dup.__name__ = "SpanCreationError"
+
+    class Client:
+        class spans:
+            @staticmethod
+            def log_spans(project_identifier, spans):
+                raise Dup("Found 1 duplicate spans:\n  - Span x")
+
+    import pytest
+
+    with pytest.raises(Dup):
+        pe._log_spans(Client, "p", [{"a": 1}, {"a": 2}])
+
+
+def test_annotating_waits_for_phoenix_to_ingest_the_spans():
+    class R:
+        status_code = 404
+
+    class NotFound(Exception):
+        response = R()
+
+    calls, sleeps = [], []
+
+    def call():
+        calls.append(1)
+        if len(calls) < 3:
+            raise NotFound()
+        return "ok"
+
+    assert pe._retry_until_ingested(call, attempts=5, delay=0, sleep=sleeps.append) == "ok" and len(calls) == 3 and len(sleeps) == 2
+
+
+def test_annotating_gives_up_after_the_attempts_and_never_retries_other_errors():
+    class R:
+        def __init__(self, c): self.status_code = c
+
+    class Err(Exception):
+        def __init__(self, c): self.response = R(c)
+
+    import pytest
+
+    n = []
+    with pytest.raises(Err):
+        pe._retry_until_ingested(lambda: (n.append(1), (_ for _ in ()).throw(Err(404)))[1], attempts=3, delay=0, sleep=lambda s: None)
+    assert len(n) == 3
+    m = []
+    with pytest.raises(Err):
+        pe._retry_until_ingested(lambda: (m.append(1), (_ for _ in ()).throw(Err(500)))[1], attempts=3, delay=0, sleep=lambda s: None)
+    assert len(m) == 1
