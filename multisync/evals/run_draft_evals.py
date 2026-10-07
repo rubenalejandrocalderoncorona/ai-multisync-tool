@@ -30,6 +30,8 @@ def run(argv: list[str], env=None, client=None, evaluate=None, log=None, judge=N
     ap.add_argument("--sample", type=int, default=0, help="only N drafts, spread evenly over the window (for calibration)")
     ap.add_argument("--dry-run", action="store_true", help="read and build the evaluator inputs, print the evidence size per span, call no model, log nothing")
     ap.add_argument("--explain", action="store_true", help="score and print each score with its unsupported quotes; never logs annotations")
+    ap.add_argument("--include-chunks-only", action="store_true", help="also judge drafts whose span carries no source text (older spans, or content capture off). Off by default: "
+                    "judged on the retrieved chunks alone they read as unfaithful almost always, which is noise, not a finding")
     a = ap.parse_args(argv)
 
     from . import phoenix_io as px
@@ -48,7 +50,12 @@ def run(argv: list[str], env=None, client=None, evaluate=None, log=None, judge=N
     if a.sample and len(inputs) > a.sample:
         step = len(inputs) / a.sample
         inputs = [inputs[int(i * step)] for i in range(a.sample)]
-    print(f"{len(rows)} draft spans, {len(inputs)} evaluable, {len(skipped)} skipped")
+    weak_skipped = 0
+    if not a.include_chunks_only:
+        strong = [r for r in inputs if r["evidence"] != "chunks_only"]
+        weak_skipped, inputs = len(inputs) - len(strong), strong
+    print(f"{len(rows)} draft spans, {len(inputs)} evaluable, {len(skipped)} skipped"
+          + (f", {weak_skipped} left unscored (no source text on the span; --include-chunks-only to judge them on the chunks alone)" if weak_skipped else ""))
     if a.dry_run:
         for r in inputs:
             print(f"  {r['span_id']}  {r['change_unit_id']}  evidence {r['evidence']}: {r['evidence_chars']} chars ({r['source_files']} source files, {r['source_chars']} source chars, "

@@ -169,13 +169,13 @@ ENV = {"PHOENIX_COLLECTOR_ENDPOINT": "http://phoenix.test", "PHOENIX_PROJECT_NAM
 
 def test_zero_draft_spans_exits_0_with_a_clear_message_and_calls_no_model(capsys):
     client = FakeClient([])
-    assert run_draft_evals.run([], env=ENV, client=client, judge=object()) == 0
+    assert run_draft_evals.run(["--include-chunks-only"], env=ENV, client=client, judge=object()) == 0
     assert "no draft spans in project proj" in capsys.readouterr().out and client.spans.logged == {}
 
 
 def test_the_script_scores_every_draft_span_and_logs_one_evaluation_per_original_span_id(capsys):
     client = FakeClient([span("s1"), span("s2", page="b.md"), span("s3", output=None)])
-    assert run_draft_evals.run([], env=ENV, client=client, judge=PipelineJudge(judge_llm(["faithful", "unfaithful"]))) == 0
+    assert run_draft_evals.run(["--include-chunks-only"], env=ENV, client=client, judge=PipelineJudge(judge_llm(["faithful", "unfaithful"]))) == 0
     q = client.spans.calls[0]
     assert q["project_identifier"] == "proj" and "name == 'draft'" in json.dumps(q["query"].to_dict()) and (q["end_time"] - q["start_time"]).total_seconds() == 24 * 3600
     assert {k: v["result.score"] for k, v in client.spans.logged.items()} == {"s1": 1.0, "s2": 0.0}
@@ -184,23 +184,23 @@ def test_the_script_scores_every_draft_span_and_logs_one_evaluation_per_original
 
 def test_a_rerun_overwrites_the_same_evaluation_names_on_the_same_span_ids():
     client = FakeClient([span("s1"), span("s2", page="b.md")])
-    run_draft_evals.run([], env=ENV, client=client, judge=PipelineJudge(judge_llm(["faithful", "faithful"])))
+    run_draft_evals.run(["--include-chunks-only"], env=ENV, client=client, judge=PipelineJudge(judge_llm(["faithful", "faithful"])))
     first = set(client.spans.logged)
-    run_draft_evals.run([], env=ENV, client=client, judge=PipelineJudge(judge_llm(["unfaithful", "unfaithful"])))
+    run_draft_evals.run(["--include-chunks-only"], env=ENV, client=client, judge=PipelineJudge(judge_llm(["unfaithful", "unfaithful"])))
     assert set(client.spans.logged) == first == {"s1", "s2"}
     assert all(v["annotation_name"] == de.EVAL_NAME and v["result.score"] == 0.0 for v in client.spans.logged.values())
 
 
 def test_dry_run_calls_no_model_and_logs_nothing(capsys):
     client = FakeClient([span("s1")])
-    assert run_draft_evals.run(["--dry-run"], env=ENV, client=client, judge=None) == 0
+    assert run_draft_evals.run(["--include-chunks-only", "--dry-run"], env=ENV, client=client, judge=None) == 0
     out = capsys.readouterr().out
     assert client.spans.logged == {} and "1 evaluable" in out and "evidence chunks_only" in out and "s1" in out
 
 
 def test_max_spans_caps_what_reaches_the_judge():
     client = FakeClient([span("s1"), span("s2", page="b.md"), span("s3", page="c.md")])
-    run_draft_evals.run(["--max-spans", "2"], env=ENV, client=client, judge=PipelineJudge(judge_llm(["faithful", "faithful"])))
+    run_draft_evals.run(["--include-chunks-only", "--max-spans", "2"], env=ENV, client=client, judge=PipelineJudge(judge_llm(["faithful", "faithful"])))
     assert set(client.spans.logged) == {"s1", "s2"}
 
 
@@ -407,7 +407,7 @@ def test_the_script_logs_label_counts_and_quotes_in_the_metadata():
     captured = []
     client = FakeClient([with_source(span("s1")), span("old", page="o.md")])
     reply = json.dumps({"claims": 4, "unsupported": ["bad claim"]})
-    run_draft_evals.run([], env=ENV, client=client, judge=PipelineJudge(judge_llm([reply, reply])), log=lambda c, ann: captured.extend(ann) or len(ann))
+    run_draft_evals.run(["--include-chunks-only"], env=ENV, client=client, judge=PipelineJudge(judge_llm([reply, reply])), log=lambda c, ann: captured.extend(ann) or len(ann))
     by = {a["span_id"]: a for a in captured}
     assert by["s1"]["label"] == "partial" and by["s1"]["score"] == 0.75 and by["s1"]["metadata"]["claims"] == 4 and by["s1"]["metadata"]["unsupported"] == 1
     assert by["s1"]["metadata"]["quotes"] == ["bad claim"] and by["s1"]["metadata"]["evidence"] == "source+chunks"
@@ -421,3 +421,12 @@ def test_flag_low_scores_shows_quotes_counts_and_the_weaker_chunks_only_note():
     assert code == 0 and "3 of 4 claims unsupported" in text and "weaker score: chunks only" in text and "quote  invented flag --x" in text
     code, text = evals_cli.run(["flag-low-scores"], env={**ENV, "DRAFT_EVALS_THRESHOLD": "0.2"}, client=client, facts=MemoryFactStore())
     assert "no draft scored below 0.2" in text
+
+
+def test_spans_without_source_text_are_left_unscored_by_default_and_judged_only_when_asked(capsys):
+    client = FakeClient([span("s1"), span("s2", page="b.md")])
+    assert run_draft_evals.run([], env=ENV, client=client, judge=PipelineJudge(judge_llm(["faithful", "faithful"]))) == 0
+    out = capsys.readouterr().out
+    assert "0 evaluable" in out and "2 left unscored" in out and client.spans.logged == {}
+    run_draft_evals.run(["--include-chunks-only"], env=ENV, client=client, judge=PipelineJudge(judge_llm(["faithful", "faithful"])))
+    assert len(client.spans.logged) == 2
