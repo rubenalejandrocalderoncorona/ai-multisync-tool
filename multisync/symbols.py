@@ -188,7 +188,83 @@ def _config_file_symbols(file_path: str, text: str, out: list) -> None:
         _add(out, "config", m.group(1), "")
 
 
-def extract_public_symbols(file_path: str, text: str) -> list[dict]:
+# ── Client calls: the API paths a CONSUMER's code requests (kind `client_call`) ─────────────────────────────────────────────
+# Not part of a repo's public interface: only extract_public_symbols(..., calls=True) emits them, and only the symbols table stores them.
+# public_symbols()/diff_public_symbols() (router, prefilter) never see them, so a consumer that adds a call is not "a public change".
+_ASSET_EXT = re.compile(r"\.(?:js|mjs|css|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|html?|txt|xml|pdf|md|json|ya?ml|properties|java|kt|py)$", re.I)
+_NON_API_ROOTS = {"usr", "etc", "var", "tmp", "home", "opt", "dev", "proc", "bin", "static", "assets", "images", "img", "css", "js", "fonts",
+                  "node_modules", "public", "favicon.ico"}
+_BASE_PREFIX = re.compile(r"^(?:\$\{[^}]*\}|\$\w+|\{[\w.]+\})(?=/)")  # `${BASE}/api/x`, `$base/api/x`, f"{base}/api/x"
+_API_PREFIX = re.compile(r"^/(?:api|rest|v\d+)(?:/|$)", re.I)
+_HTTP_CALL_CTX = re.compile(r"\b(?:fetch|axios|http|https|api|client|request|requests|httpx|session|uri|path|get|post|put|patch|delete|exchange|getfor\w+|postfor\w+|retrieve)\w*\s*\(\s*(?:HttpMethod\.\w+\s*,\s*)?$", re.I)
+_PROVIDER_CALL_CTX = re.compile(r"\b(?:app|router|server)\.(?:get|post|put|patch|delete|all|use)\(\s*$")
+_PATH_CONST_NAME = re.compile(r"PATH|URL|URI|ENDPOINT|ROUTE|API", re.I)
+_BLANK = lambda m: re.sub(r"[^\n]", " ", m.group(0))  # noqa: E731
+
+
+def _client_path(lit: str) -> str | None:
+    """The API path a string literal denotes, or None when it does not look like one (needs a leading `/` and at least two segments)."""
+    s = _BASE_PREFIX.sub("", lit.strip())
+    if not s.startswith("/") or s.startswith("//") or not re.fullmatch(r"/[\w\-./{}:$<>?=&%,~@+]*", s):
+        return None
+    path = re.split(r"[?#]", s, maxsplit=1)[0].rstrip("/")
+    segs = [x for x in path.split("/") if x]
+    if len(segs) < 2 or _ASSET_EXT.search(path) or segs[0].lower() in _NON_API_ROOTS:
+        return None
+    if all(re.fullmatch(r"api|rest|v\d+", x, re.I) for x in segs):
+        return None  # `/api/v1` is a base path
+    return path
+
+
+def _client_calls(ext: str, text: str, out: list) -> None:
+    java_like = ext in ("java", "kt")
+    if not (java_like or ext in ("js", "jsx", "mjs", "cjs", "ts", "tsx", "py")):
+        return
+    seen: set[str] = set()
+
+    def add(path: str | None, ok: bool) -> None:
+        if path and ok and path not in seen:
+            seen.add(path)
+            _add(out, "client_call", path, "")
+
+    if java_like:
+        text = _java_strip_comments(text)
+        # constants that feed a mapping annotation are what this repo SERVES, not what it calls
+        served: set[str] = set()
+        for m in re.finditer(r"@(?:\w*Mapping|Path)\s*\(" + _ANNOTATION_ARGS + r"\)", text):
+            served.update(re.findall(r"\b([A-Za-z_]\w*)\b", re.sub(r"\"(?:\\.|[^\"\\])*\"", "", m.group(1))))
+        if ext == "java":
+            no_strings = re.sub(r"\"(?:\\.|[^\"\\])*\"", '""', text)
+            for name, val in _java_constants(text).items():
+                concatenated = re.search(rf"\b{re.escape(name)}\s*\+|\+\s*{re.escape(name)}\b", no_strings)
+                if name not in served and not concatenated:
+                    p = _client_path(val)
+                    add(p, bool(p) and bool(_API_PREFIX.match(_BASE_PREFIX.sub("", val)) or _PATH_CONST_NAME.search(name)))
+            # declarations are handled above; the `"/a" + X` pieces inside them are not calls
+            text = re.sub(r"\bString\s+\w+\s*=\s*(?:\"(?:\\.|[^\"\\])*\"|\w+|\s|\+)+;", _BLANK, text)
+        text = re.sub(r"@[\w.]+\s*\(" + _ANNOTATION_ARGS + r"\)", _BLANK, text)
+        strings = re.compile(r"\"((?:\\.|[^\"\\\n])*)\"")
+    elif ext == "py":
+        strings = re.compile(r"\"((?:\\.|[^\"\\\n])*)\"|'((?:\\.|[^'\\\n])*)'")
+    else:
+        strings = re.compile(r"\"((?:\\.|[^\"\\\n])*)\"|'((?:\\.|[^'\\\n])*)'|`((?:\\.|[^`\\])*)`")
+    for m in strings.finditer(text):
+        lit = next((g for g in m.groups() if g is not None), "")
+        path = _client_path(lit)
+        if not path:
+            continue
+        before = text[max(0, m.start() - 80):m.start()]
+        if re.match(r"\s*\+", text[m.end():m.end() + 8]) or re.search(r"\+\s*$", before):
+            continue  # one piece of a concatenation: a base path is not a call
+        if ext == "py" and before.rsplit("\n", 1)[-1].lstrip().startswith("@"):
+            continue  # decorator: a route this repo serves
+        if _PROVIDER_CALL_CTX.search(before):
+            continue
+        add(path, bool(_API_PREFIX.match(_BASE_PREFIX.sub("", lit.strip()))) or bool(_HTTP_CALL_CTX.search(before)))
+
+
+def extract_public_symbols(file_path: str, text: str, calls: bool = False) -> list[dict]:
+    """`calls=True` also returns the consumer side (kind `client_call`); only the FactStore wants those."""
     out: list[dict] = []
     ext = (file_path.rsplit(".", 1)[-1] if "." in file_path else "").lower()
     is_js = bool(re.match(r"^(js|jsx|mjs|cjs|ts|tsx)$", ext)) or not file_path
@@ -253,6 +329,8 @@ def extract_public_symbols(file_path: str, text: str) -> list[dict]:
         _add(out, "config", m.group(1), "")
     for m in re.finditer(r"\b(?:os\.environ(?:\.get)?\s*[\[(]\s*|os\.getenv\(\s*|getenv\(\s*|os\.Getenv\(\s*)[\"']([A-Z][A-Z0-9_]{2,})[\"']", text):
         _add(out, "config", m.group(1), "")
+    if calls:
+        _client_calls(ext, text, out)
     return out
 
 

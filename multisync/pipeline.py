@@ -35,7 +35,8 @@ from .context import retrieve_code, retrieve_semantic
 from .coverage import check_coverage
 from .critic import evaluate, judge as run_judge
 from .prefilter import prefilter
-from .registry import cross_repo_check
+from .contracts import consumer_repos, gate_mode
+from .registry import cross_repo_check, linked_contract_points, touched_routes
 from .router import route_change
 from .config import policy_version
 from .repofacts import checked_repo_facts, facts_text, known_fact_lines
@@ -84,6 +85,7 @@ class State(TypedDict, total=False):
     decision: Any
     patch: Any
     patchFallback: bool
+    linkedPoints: Any
 
 
 def initial_state(change: dict) -> State:
@@ -219,22 +221,39 @@ def process_change(change: dict, deps) -> dict:
         return {"note": {"reason": pre["reason"], "forced": pre["forced"], **pre["metrics"]["diff"]}, "update": update}
 
     def n_cross_repo(s):
+        # Manual contract points (feature-registry.json) plus the automatic ones: routes this change touches that a LINKED repo calls.
         symbols = [x for x in registry if x in change["after"]]
-        if not symbols:
+        gate = gate_mode(policy, cfg.get("crossRepoGate"))
+        points: list[dict] = []
+        if gate != "off" and mode == "code":
+            repos_config = deps.get("reposConfig") or {"repos": {change["repo"]: dict(policy)}}
+            consumers = consumer_repos(repos_config, change["repo"])
+            if consumers:
+                points = linked_contract_points(touched_routes(change.get("before"), change["after"]), consumers, facts)
+        if not symbols and not points:
             return {"status": "skip", "note": {"registered": []}}
-        cross = cross_repo_check(symbols, change["repo"], registry, facts)
-        update = {"metrics": {"crossRepo": cross}}
-        if cross["complete"]:
-            return {"note": {"registered": cross["registered"]}, "update": update}
-        detail = "; ".join(f"{i['symbol']} awaiting {', '.join(i['missing'])}" for i in cross["incomplete"])
-        return {"status": "stop", "note": {"incomplete": cross["incomplete"]},
+        cross = cross_repo_check(symbols, change["repo"], registry, facts) if symbols else {"registered": [], "incomplete": [], "complete": True}
+        linked_missing = [p for p in points if p["missing"]]
+        if points:
+            cross = {**cross, "mode": "linked", "gate": gate, "points": points}
+            if linked_missing and gate == "warn":
+                cross["warning"] = "linked repo documentation missing (gate is warn, draft continues): " + "; ".join(
+                    f"{p['route']} awaiting {', '.join(p['missing'])}" for p in linked_missing)
+        update = {"metrics": {"crossRepo": cross}, "linkedPoints": points}
+        blocking = linked_missing if gate == "block" else []
+        if cross["complete"] and not blocking:
+            return {"note": {"registered": cross["registered"], "linked": [p["route"] for p in points], **({"warning": cross["warning"]} if cross.get("warning") else {})},
+                    "update": update}
+        detail = "; ".join([f"{i['symbol']} awaiting {', '.join(i['missing'])}" for i in cross["incomplete"]]
+                           + [f"{p['route']} awaiting {', '.join(p['missing'])}" for p in blocking])
+        return {"status": "stop", "note": {"incomplete": cross["incomplete"], "linked": blocking},
                 "update": {**update, "decision": finish(with_metrics(s, update["metrics"]), {
                     "outcome": "fallback", "reviewerAction": "auto_rejected", "rootCauseTag": "cross_repo_incomplete",
                     "reason": f"feature not available end to end: {detail}", "draft": None})}}
 
     def n_route(s):
         """Which model tier drafts this change. Free: no model call."""
-        r = route_change(change, registry, facts, cfg["ai"]["routerForce"])
+        r = route_change(change, registry, facts, cfg["ai"]["routerForce"], linked=s.get("linkedPoints") or None)
         return {"note": {"tier": r["tier"], "reasons": r["reasons"], "publicChanged": len(r["signals"]["publicChanged"]), "publicTotal": r["signals"]["total"],
                          "registryHits": len(r["signals"]["registry"]), "referencedBy": r["signals"]["referencedBy"]},
                 "update": {"tier": r["tier"], "routeInfo": r, "metrics": {"diffClassification": r["classification"]}, "ctx": {"route": {"tier": r["tier"], "reasons": r["reasons"]}}}}

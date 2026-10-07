@@ -36,6 +36,29 @@ Add an entry to `config/repos.json` in the central repo (change it by pull reque
 | `docs` | globs of **existing documentation** to load as semantic context (an end-user docs app, CONTRIBUTING) |
 | `glossary` | the product name, and upstream names that must never appear |
 
+### Linking repositories that share an API (optional)
+
+When this repo's HTTP API is called by another repo (a backend and its frontend), declare the link ONCE, on either side:
+
+```json
+"Fidavia/fidavia":          { "linkedRepos": ["Fidavia/fidavia-frontend"], "contract": { "role": "provider" } },
+"Fidavia/fidavia-frontend": { "contract": { "role": "consumer" } }
+```
+
+| Field | Meaning |
+|---|---|
+| `linkedRepos` | up to 10 `owner/repo` strings. The link is symmetrical in meaning: if A lists B, the pair is linked even if B does not list A. Declare each pair once |
+| `contract.role` | `provider`, `consumer` or `both` (default). A consumer-only repo never gates; a provider-only repo is never treated as a caller |
+| `crossRepoGate` | `block` (default), `warn` (the draft continues, the warning is in `metrics.crossRepo.warning`) or `off`. Env `CROSS_REPO_GATE` overrides it |
+
+How it decides, per change, with no model: a provider route that the change added or modified is a contract point when a linked repo has a
+`client_call` for it (a literal API path in its code, for example `private static final String EVENT_VENUE_PATH = "/api/v1/events/{id}/venue"`;
+`{id}`, `:id`, `<id>` and `${id}` all match the same segment). That consumer must then have an approved document that mentions its call, else the
+page ends `cross_repo_incomplete` naming the awaited repo. A route nobody calls yet never blocks. The consumer repo must itself be onboarded with
+its API client code inside some page `scope`, so its calls are extracted. Best practice: link only repos that share an API.
+`config/feature-registry.json` stays as the manual override for features the extraction cannot see.
+The dry run warns about unknown linked repos, bad roles and links declared on both sides.
+
 Rules of thumb that came from real runs:
 - A page about *everything in X* needs a scope that really contains X (Prisma models live in `prisma/models/*.prisma`, not in `schema.prisma`).
 - One page per area. A page whose scope is far larger than the model's snapshot (about 60,000 characters) is built from a fraction of its files.

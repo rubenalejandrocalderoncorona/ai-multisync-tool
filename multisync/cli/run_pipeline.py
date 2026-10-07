@@ -172,7 +172,7 @@ def main() -> None:
             if context_error and change["kind"] == "code":
                 raise RuntimeError(f"context sync failed: {context_error}")
             decision = process_change(change, {
-                "styles": styles, "cfg": cfg, "llm": d["llm"], "vectors": d["vectors"], "codeVectors": d["codeVectors"], "facts": d["facts"], "registry": d["registry"],
+                "styles": styles, "cfg": cfg, "llm": d["llm"], "vectors": d["vectors"], "codeVectors": d["codeVectors"], "facts": d["facts"], "registry": d["registry"], "reposConfig": d["reposConfig"],
                 "policy": policy, "instructions": instructions, "templateFiles": template_files, "defaultTemplate": default_template, "runId": run_id,
                 "githubHost": env.get("GIT_HOST"), "repoGit": G.accessors(source_dir), "logger": logger, "escalate": escalate_fn, "siteRepo": site_repo or None,
             })

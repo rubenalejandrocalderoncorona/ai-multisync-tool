@@ -117,6 +117,8 @@ def load_config(env: Mapping[str, str] | None = None) -> AttrDict:
             "patchGuardMinSections": _num(g("PATCH_GUARD_MIN_SECTIONS"), 4),  # pages with fewer sections are not guarded
             "contextMinScore": _num(g("CONTEXT_MIN_SCORE"), 0.45),  # retrieved chunks below this cosine score are dropped
         },
+        # off | warn | block: the automatic linked-repos gate. Overrides a repo's own `crossRepoGate`; empty means "use the repo's, else block".
+        "crossRepoGate": (g("CROSS_REPO_GATE") or "").strip().lower(),
         "paths": {
             "reposConfig": g("REPOS_CONFIG") or "config/repos.json",
             "featureRegistry": g("FEATURE_REGISTRY") or "config/feature-registry.json",
