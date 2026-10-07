@@ -1,0 +1,44 @@
+# Review-outcome export: every 6 hours, reads multisync.review_outcomes (READ ONLY) and writes `review_outcome` / `review_segment_metrics` spans
+# and annotations to Phoenix (docs/OBSERVABILITY.md). Informational only: nothing is approved or routed on this basis.
+# Image: the `evals` target (same as draft-evals-cronjob.yaml). Reads multisync-config (PHOENIX_COLLECTOR_ENDPOINT, PHOENIX_PROJECT_NAME) and, from
+# multisync-secrets, PHOENIX_API_KEY and FACTSTORE_DATABASE_URL.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: multisync-review-evals
+  namespace: multirepo
+spec:
+  schedule: "15 */6 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 172800
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: review-evals
+              image: __PIPELINE_IMAGE__-evals
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "multisync.cli.phoenix_review_evals"]
+              envFrom:
+                - configMapRef: { name: multisync-config }
+              env:
+                - name: FACTSTORE_DATABASE_URL
+                  valueFrom: { secretKeyRef: { name: multisync-secrets, key: FACTSTORE_DATABASE_URL } }
+                - name: PHOENIX_API_KEY
+                  valueFrom: { secretKeyRef: { name: multisync-secrets, key: PHOENIX_API_KEY } }
+              resources:
+                requests: { cpu: 50m, memory: 192Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 1000
+                capabilities: { drop: ["ALL"] }

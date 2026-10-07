@@ -19,7 +19,11 @@ def main(argv: list[str] | None = None) -> int:
         from .evals import main as evals_main
 
         return evals_main(argv[1:])
-    print("usage: multisync metrics review-readiness|audit-gap --segment <internal|public_interface>:<cheap|expensive> [...]\n       multisync audit list|show <id>|submit <id> --reviewer <login> --accurate yes|no\n       multisync evals flag-low-scores [--threshold 0.7] [--hours 24] [--ticket]", file=sys.stderr)
+    if argv and argv[0] == "phoenix-review-evals":
+        from .phoenix_review_evals import main as pre_main
+
+        return pre_main(argv[1:])
+    print("usage: multisync metrics review-readiness|audit-gap --segment <internal|public_interface>:<cheap|expensive> [...]\n       multisync audit list|show <id>|submit <id> --reviewer <login> --accurate yes|no\n       multisync evals flag-low-scores [--threshold 0.7] [--hours 24] [--ticket]\n       multisync phoenix-review-evals [--dry-run] [--min-samples N] [--threshold X] [--json]", file=sys.stderr)
     return 2
 
 
