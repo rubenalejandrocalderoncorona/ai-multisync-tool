@@ -40,6 +40,11 @@ def _new_usage() -> dict:
     }
 
 
+def usd_total(usage: dict | None) -> float:
+    """Dollars in a usage snapshot: the sum of `usd` over every tier (and the embed slot when it carries a figure)."""
+    return float(sum(float((v or {}).get("usd") or 0) for v in (usage or {}).values() if isinstance(v, dict)))
+
+
 class LLM:
     """`ai_config` comes from load_config().ai. `tiers.{cheap,expensive}` pick the endpoint, key, model and temperature per call.
     A flat config (no tiers) behaves as one provider."""

@@ -121,6 +121,8 @@ def load_config(env: Mapping[str, str] | None = None) -> AttrDict:
             "patchMinImprovement": _num(g("PATCH_MIN_IMPROVEMENT"), 0.05),  # patch draft: stop early when best recall has not improved by this much over attempt 1 ...
             "patchConvergeAfter": _num(g("PATCH_CONVERGE_AFTER"), 3),  # ... checked once this many attempts failed the judge; 0 turns the check off
             "patchScopedJudge": _num(g("PATCH_SCOPED_JUDGE"), 1),  # 0: a patched page is judged whole against the whole snapshot again
+            "maxPageUsd": _num(g("MAX_PAGE_USD"), 1.5),  # cost ceiling per page: no new writer attempt once the page has spent this much (0 = off)
+            "maxRunUsd": _num(g("MAX_RUN_USD"), 6),  # cost ceiling per run: remaining pages are not attempted once the run has spent this much (0 = off)
             "contextMinScore": _num(g("CONTEXT_MIN_SCORE"), 0.45),  # retrieved chunks below this cosine score are dropped
         },
         # off | warn | block: the automatic linked-repos gate. Overrides a repo's own `crossRepoGate`; empty means "use the repo's, else block".

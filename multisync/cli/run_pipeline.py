@@ -32,6 +32,7 @@ from ..codesource import build_code_changes, pages_scope
 from ..config import repo_policy
 from ..context import sync_context, sync_site
 from ..fallback import escalate
+from ..llm import usd_total
 from ..pipeline import find_site_page, process_change
 from ..prompts import load_styles
 from ..repofacts import profile_repo
@@ -170,8 +171,23 @@ def main() -> None:
         changes = [c for c in changes if not (c["kind"] == "code" and c["filePath"] not in only)]
     print(f"mode={mode_setting or 'docs'} | {len(changes)} change unit(s){' (only: ' + ', '.join(only) + ')' if only else ''}")
 
+    run_ceiling = cfg["thresholds"]["maxRunUsd"]
+    run_spend = lambda: usd_total(d["llm"].usage) if hasattr(d["llm"], "usage") else 0.0  # noqa: E731
+    not_attempted = 0
+
     for change in changes:
         file = change["filePath"]
+        if run_ceiling and run_spend() >= run_ceiling:
+            # Run ceiling reached: no model call for the rest. The pages are visible as fallbacks (no ticket) and can be re-run with ONLY_PAGES.
+            not_attempted += 1
+            decision = {"runId": run_id, "repo": repo, "path": file, "commit": commit, "outcome": "fallback", "reviewerAction": "auto_rejected",
+                        "rootCauseTag": "cost_ceiling_run", "attempts": [], "metrics": {"costUsd": 0}, "action": "none", "trail": [], "ticket": None,
+                        "reason": f"not attempted: run spent ${run_spend():.2f} of the ${run_ceiling:g} run ceiling"}
+            apply_decision(decision, d, repo, file, commit)
+            d["facts"].record_decision(decision)
+            results.append({k: v for k, v in decision.items() if k != "trail"} | {"stages": []})
+            print(f"  {decision['outcome'].ljust(14)} {file}  — {decision['reason']} [cost_ceiling_run]")
+            continue
         try:
             if blocked and change["kind"] == "code":
                 raise OnboardingBlocked(blocked)
@@ -190,6 +206,7 @@ def main() -> None:
         apply_decision(decision, d, repo, file, commit)
         d["facts"].record_decision(decision)
         slim = {k: v for k, v in decision.items() if k not in ("content", "draft", "trail")}
+        slim["costUsd"] = (decision.get("metrics") or {}).get("costUsd", (decision.get("cost") or {}).get("usd"))
         slim["stages"] = [f"{t['node']}:{t['status']}" for t in decision.get("trail") or []]
         results.append(slim)
         tag = f" [{decision['rootCauseTag']}]" if decision.get("rootCauseTag") else ""
@@ -199,6 +216,10 @@ def main() -> None:
         json.dump({"runId": run_id, "repo": repo, "commit": commit, "trust": policy.get("trust"), "results": results}, fh, indent=2, default=str)
     count = lambda o: sum(1 for r in results if r["outcome"] == o)  # noqa: E731
     print(f"\npublished {count('published')} | pending_review {count('pending_review')} | refreshed {count('refreshed')} | skipped {count('skipped')} | fallback {count('fallback')}")
+    spent = [f"{r['path']} ${r['costUsd']:.2f}" for r in results if r.get("costUsd")]
+    print(f"spend: run ${run_spend():.2f}" + (f" (ceiling ${run_ceiling:g})" if run_ceiling else "") + (" | per page: " + ", ".join(spent) if spent else ""))
+    if not_attempted:
+        print(f"{not_attempted} pages not attempted: run ceiling ${run_ceiling:g} reached (re-run them with ONLY_PAGES=<page paths>)")
     d["facts"].close()
     tracing.flush()
 

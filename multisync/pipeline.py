@@ -39,6 +39,7 @@ from .contracts import consumer_repos, gate_mode
 from .registry import cross_repo_check, linked_contract_points, touched_routes
 from .router import route_change
 from .config import policy_version
+from .llm import usd_total
 from .repofacts import checked_repo_facts, facts_text, known_fact_lines
 from .stages import analyze_code, plan_docs, plan_text, sheet_text
 from .symbols import public_symbols
@@ -174,6 +175,11 @@ def process_change(change: dict, deps) -> dict:
            codeVectors?, styles?, siteRepo?}"""
     cfg, llm, vectors, facts, registry, policy, run_id = deps["cfg"], deps["llm"], deps["vectors"], deps["facts"], deps["registry"], deps["policy"], deps["runId"]
     code_vectors = deps.get("codeVectors") or vectors
+    spend0 = usd_total(llm.snapshot_usage()) if hasattr(llm, "snapshot_usage") else 0.0
+
+    def page_spend() -> float:
+        return usd_total(llm.snapshot_usage()) - spend0 if hasattr(llm, "snapshot_usage") else 0.0
+
     logger = deps.get("logger")
     t = cfg["thresholds"]
     base = {"runId": run_id, "repo": change["repo"], "path": change["filePath"], "commit": change["commit"]}
@@ -599,8 +605,25 @@ def process_change(change: dict, deps) -> dict:
         ticket = deps["escalate"](d) if deps.get("escalate") else None
         return {"status": "fallback", "note": {"rootCauseTag": d.get("rootCauseTag"), "ticket": ticket}, "update": {"decision": {**d, "ticket": ticket}}}
 
+    def n_cost_stop(s):
+        """Cost ceiling reached between attempts: keep the last draft and feedback, publish nothing, open no ticket."""
+        spent, ceiling = page_spend(), t["maxPageUsd"]
+        d = finish(s, {"outcome": "fallback", "reviewerAction": "auto_rejected", "rootCauseTag": "cost_ceiling_page",
+                       "reason": f"page spent ${spent:.2f} of the ${ceiling:g} page ceiling after {len(s['attempts'])} attempt(s); last check: {(s.get('failure') or {}).get('tag')}",
+                       "draft": s.get("draft"), "feedback": (s.get("failure") or {}).get("feedback")})
+        return {"status": "fallback", "note": {"rootCauseTag": "cost_ceiling_page", "spentUsd": round(spent, 4), "ceilingUsd": ceiling}, "update": {"decision": {**d, "ticket": None}}}
+
     # ── routing ──────────────────────────────────────────────────────────────────
+    def cost_guard(dest):
+        """Checked before every attempt that would call the writer (never inside one). Over the page ceiling => cost_stop."""
+        if dest in ("write_draft", "widen") and t["maxPageUsd"] and page_spend() >= t["maxPageUsd"]:
+            return "cost_stop"
+        return dest
+
     def after_judge(s):
+        return cost_guard(_after_judge(s))
+
+    def _after_judge(s):
         if s.get("accepted"):
             return "publish"
         if s.get("noConverge"):
@@ -614,13 +637,13 @@ def process_change(change: dict, deps) -> dict:
 
     def after_verify(s):
         if s["escalatePending"]:
-            return "write_draft"
+            return cost_guard("write_draft")
         return after_judge(s) if s["verifyFailed"] else "judge"
 
     g = StateGraph(State)
     for name, fn in [("prefilter", n_prefilter), ("cross_repo", n_cross_repo), ("route", n_route), ("similarity", n_similarity), ("code_context", n_code_context),
                      ("gar", n_gar), ("semantic_context", n_semantic_context), ("write_draft", n_write_draft), ("verify_draft", n_verify_draft),
-                     ("judge", n_judge), ("polish_draft", n_polish_draft), ("widen", n_widen), ("publish", n_publish), ("fallback", n_fallback)]:
+                     ("judge", n_judge), ("polish_draft", n_polish_draft), ("widen", n_widen), ("publish", n_publish), ("fallback", n_fallback), ("cost_stop", n_cost_stop)]:
         g.add_node(name, traced(name, fn))
     g.add_edge(START, "prefilter")
     g.add_conditional_edges("prefilter", lambda s: END if s.get("decision") else "cross_repo", ["cross_repo", END])
@@ -631,12 +654,13 @@ def process_change(change: dict, deps) -> dict:
     g.add_conditional_edges("gar", lambda s: "semantic_context" if mode == "code" else "write_draft", ["semantic_context", "write_draft"])
     g.add_edge("semantic_context", "write_draft")
     g.add_edge("write_draft", "verify_draft")
-    g.add_conditional_edges("verify_draft", after_verify, ["judge", "write_draft", "polish_draft", "widen", "fallback"])
-    g.add_conditional_edges("judge", after_judge, ["publish", "polish_draft", "write_draft", "widen", "fallback"])
+    g.add_conditional_edges("verify_draft", after_verify, ["judge", "write_draft", "polish_draft", "widen", "fallback", "cost_stop"])
+    g.add_conditional_edges("judge", after_judge, ["publish", "polish_draft", "write_draft", "widen", "fallback", "cost_stop"])
     g.add_edge("polish_draft", "judge")
     g.add_conditional_edges("widen", lambda s: "code_context" if mode == "code" else "write_draft", ["code_context", "write_draft"])  # re-read the whole context with a bigger budget
     g.add_edge("publish", END)
     g.add_edge("fallback", END)
+    g.add_edge("cost_stop", END)
     app = g.compile(checkpointer=MemorySaver())
 
     with tracing.span(f"docs-sync {change['repo']} {change['filePath']}", "AGENT", **{"session.id": run_id, "multisync.repo": change["repo"], "multisync.page": change["filePath"],
@@ -651,4 +675,7 @@ def process_change(change: dict, deps) -> dict:
         d = final["decision"]
         root.set(**{"multisync.outcome": d.get("outcome"), "multisync.tier": d.get("tier"), "multisync.escalated": bool(d.get("escalated")), "multisync.cost_usd": (d.get("cost") or {}).get("usd")})
         root.io(output=f"{d.get('outcome')}: {d.get('reason')}")
-    return {**final["decision"], "trail": final["trail"]}
+    cost_usd = round(page_spend(), 4)
+    decision = {**final["decision"], "trail": final["trail"]}
+    decision["metrics"] = {**(decision.get("metrics") or {}), "costUsd": (decision.get("cost") or {}).get("usd", cost_usd)}
+    return decision
