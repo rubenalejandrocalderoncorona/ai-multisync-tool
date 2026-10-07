@@ -52,13 +52,19 @@ flowchart TD
 | 3 | route | Free, no model: classify `internal` vs `public_interface` (changed public symbol, route, config key, registry hit, or symbol other docs mention) and pick the tier: cheap or expensive. | |
 | 4 | similarity | Embed a hypothetical paragraph of what the docs would say, compare to the approved page. Similarity at least 0.92 means the page already says it. | `refreshed` (page re-keyed, no PR) |
 | 5 | code_context, gar, semantic_context | Retrieve code and doc chunks (top 12 code chunks, 30 000 char budget, drop cosine below 0.45), generate the hypothetical answer, add related pages. | |
-| 6 | write_draft | Draft with the chosen tier, the page brief, style, outline and facts. | |
-| 7 | verify_draft | Deterministic, no model: required symbols named, structure, front matter. A cheap draft that fails is redone once on the expensive tier without using an attempt. | back to 6 |
+| 6 | write_draft | Draft with the chosen tier, the page brief, style, outline and facts. Incremental code runs over an existing page use **patch drafting** (below); everything else rewrites the page. | |
+| 7 | verify_draft | Deterministic, no model: required symbols named, structure, front matter, and in patch mode the `patch_too_broad` drift guard. A cheap draft that fails is redone once on the expensive tier without using an attempt. | back to 6 |
 | 8 | judge | Model judge scores precision (at least 0.9), recall (0.85), core recall (1.0), style (0.7), quality (0.75) and lists unsupported claims. Malformed JSON is retried once. | |
 | 9 | polish_draft | If only style or grounded-wording tags failed, polish once instead of rewriting. | back to 8 |
 | 10 | loop and widen | Up to 3 attempts; then one automatic retry with expanded retrieval (up to 6 attempts in total). | |
 | 11 | publish | Add front matter (`source`, `commit`), change history, store the judged claims. Trust `review` gives `pending_review`; trust `auto` gives `published`. | `pending_review` / `published` |
 | 12 | fallback | Loop did not converge (`iteration_cap_exceeded`) or any exception (`pipeline_error`, `onboarding_blocked`). Nothing is published. | `fallback` |
+
+### Patch drafting (code mode)
+When the change unit has an existing page and the run is incremental (a previous snapshot exists: not a first draft, not `FULL_SYNC`/`FORCE_PAGES`), `write_draft` does not rewrite the page. `multisync/patching.py` splits the page (front matter and Change History removed) into sections by headings of level 1-4 (`#` inside fenced code is ignored; text before the first heading is the `(preamble)` section; ids are heading paths such as `Endpoints > Listings > GET /api/v1/listings`). The model (same tier as the router chose, prompt `prompts/patch-code.md`) sees the source diff, changed symbols, the sections, the fact sheet and plan, and returns strict JSON: `replace`, `insert_after`, `delete` operations on section ids. Code assembles the page: untouched sections stay byte-identical. The assembled page then goes through verify_draft and the judge exactly like a full draft; nothing else changes. Polish is skipped in patch mode (it would rewrite the whole page); judge feedback goes back to the patch call.
+- **Fallback**: malformed JSON (retried once), an unknown section id, a bad operation or a missing heading line makes the node fall back to the full rewrite for the rest of the page; the node note has `patchFallback: true` and `patchError`.
+- **Drift guard**: verify_draft reports `retainedPct` (share of the existing lines kept byte-identical). If replaced + deleted sections exceed `PATCH_MAX_CHANGED_SECTION_SHARE` (0.5) of the sections, the page has at least `PATCH_GUARD_MIN_SECTIONS` (4) sections and the source diff is at most `PATCH_SMALL_CHANGE_LINES` (20) lines, the draft fails with `patch_too_broad` and the reason goes back as feedback (cheap tier: the free redo on the expensive tier still applies).
+- `PATCH_DRAFTING=0` turns it off. Metrics on the decision: `patchMode`, `sectionsChanged`, `sectionsTotal`, `retainedPct`. These knobs are in the thresholds, so `policy_version` changes when this ships.
 
 Every decision, per-node log and cost is written to the FactStore (`decisions`, `node_logs`) and traced to Phoenix.
 
@@ -120,6 +126,8 @@ A human approves and merges the promotion PR into `main`. The workflow closes ev
 | No `review_outcomes` row | decision lacks labels, PR superseded, or webhook not delivered | `record_review` output in the index Job |
 | "Request changes" does nothing | webhook lacks the "Pull request reviews" event, reviewer not owner/member/collaborator, PR not bot-authored, 3 rounds used | webhook deliveries, `kubectl -n multirepo get jobs` for `multisync-revise-*`, PR comments with `multisync:revise-*` markers |
 | Revise Job ran, no push | no page passed the judge/deterministic gates (see the `revise-failed` comment), or a human pushed meanwhile (non fast-forward) | Job log, PR comment |
+| `patch_too_broad` | model replaced most sections for a tiny source change | verify_draft note `reasons`, `retainedPct`; the writer is retried with the reason |
+| `patchFallback: true` | patch reply was malformed twice, or named an unknown section | write_draft note `patchError`; the page was fully rewritten (large diff in the PR) |
 | Page not in QA after merge | `index` or `deploy` Job failed | `kubectl -n multirepo get jobs`, `docs-site` workflow run |
 
 Job logs disappear 5 minutes after the Job ends: use `python -m multisync.cli.runs` (reads Postgres) or Phoenix at `/phoenix`.

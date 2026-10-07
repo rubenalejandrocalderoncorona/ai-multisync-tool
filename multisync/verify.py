@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import re
 
+from . import patching
 from . import writer as W
 
+PATCH_TOO_BROAD = "patch_too_broad"
 SANE = {"minChars": 200, "maxChars": 120_000, "minRatioOfExisting": 0.25, "maxRatioOfExisting": 4, "mentionRatio": 0.6, "maxNamesChecked": 40}
 
 
@@ -19,8 +21,9 @@ def mentioned(text: str, name: str) -> bool:
 
 
 def verify_draft(draft: str, names: list[str] | None = None, existing: str = "", file_path: str = "", title: str | None = None,
-                 description: str | None = None, thresholds: dict | None = None) -> dict:
-    """{ok, reasons, metrics}"""
+                 description: str | None = None, thresholds: dict | None = None, patch: dict | None = None) -> dict:
+    """{ok, reasons, metrics}. `patch` (section-patch drafting only): {base, sectionsTotal, sectionsChanged, diffLines, maxShare, smallLines,
+    minSections}; adds retainedPct and the patch_too_broad check."""
     t = {**SANE, **(thresholds or {})}
     reasons: list[str] = []
     metrics: dict = {}
@@ -70,5 +73,14 @@ def verify_draft(draft: str, names: list[str] | None = None, existing: str = "",
             reasons.append(f"The draft is {ratio:.1f}x the size of the existing page: check for repetition or padding.")
     if not re.search(r"(?m)^#{2,3}\s+\S", text):
         reasons.append("The draft has no section headings.")
+
+    # 4. patch drift guard: a tiny source change must not make the model replace most of the page
+    if patch:
+        metrics["retainedPct"] = patching.retained_pct(patch["base"], text)
+        total, changed = patch["sectionsTotal"], patch["sectionsChanged"]
+        share = changed / total if total else 0
+        if total >= patch["minSections"] and share > patch["maxShare"] and patch["diffLines"] <= patch["smallLines"]:
+            reasons.append(f"{PATCH_TOO_BROAD}: the operations replaced or deleted {changed} of {total} sections ({round(share * 100)}%) for a source change of only "
+                           f"{patch['diffLines']} line(s). Change only the sections whose facts this change contradicts or leaves missing, and leave every other section out of the list.")
 
     return {"ok": not reasons, "reasons": reasons, "metrics": metrics}
