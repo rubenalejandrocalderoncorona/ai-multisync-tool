@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 from .draft_evals import EVAL_NAME, SPAN_ID, SPAN_NAME
 
 COLUMNS = ["input.value", "output.value", "retrieval.documents", "multisync.change_unit_id", "multisync.repo", "multisync.commit", "multisync.page",
-           "multisync.attempt", "multisync.tier"]
+           "multisync.attempt", "multisync.tier", "multisync.source.text", "multisync.source.sha256", "multisync.source.chars", "multisync.source.files",
+           "multisync.source.changed_files"]
 
 
 def make_client(env=None):
@@ -34,17 +35,6 @@ def draft_span_rows(client, project: str, hours: float, limit: int, now: datetim
     return [] if df is None or df.empty else df.reset_index().to_dict("records")
 
 
-def evaluate(rows: list[dict], judge):
-    """Run the faithfulness evaluator over the built rows. Returns the rows with a `faithfulness_score` JSON column (None where the judge failed)."""
-    import pandas as pd
-    from phoenix.evals import evaluate_dataframe
-    from phoenix.evals.metrics import FaithfulnessEvaluator
-
-    evaluator = FaithfulnessEvaluator(llm=judge)
-    scored = evaluate_dataframe(dataframe=pd.DataFrame(rows), evaluators=[evaluator], hide_tqdm_bar=True, exit_on_error=False, max_retries=2)
-    return scored.astype(object).where(scored.notna(), None).to_dict("records"), f"{evaluator.name}_score"
-
-
 def log_evaluations(client, annotations: list[dict]) -> int:
     """Attach the scores to the original span ids. Idempotent: Phoenix keys an annotation on (name, span, identifier), so a re-run overwrites."""
     import pandas as pd
@@ -58,4 +48,4 @@ def logged_scores(client, project: str, span_ids: list[str]) -> list[dict]:
     return [] if df is None or df.empty else df.reset_index().to_dict("records")
 
 
-__all__ = ["make_client", "project_name", "draft_span_rows", "evaluate", "log_evaluations", "logged_scores", "SPAN_ID"]
+__all__ = ["make_client", "project_name", "draft_span_rows", "log_evaluations", "logged_scores", "SPAN_ID"]

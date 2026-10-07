@@ -46,9 +46,11 @@ code excerpts, so keep the login strong.
 
 ### Draft scores (nightly evaluator)
 
-Each attempt of `write_draft` also emits a `draft` span (the fact sheet and doc plan in, the draft out, the retrieved chunks as `retrieval.documents`). A nightly
-CronJob scores those spans for hallucination with the cheap-tier model and attaches a `draft_faithfulness` evaluation to each one; `multisync evals
-flag-low-scores` lists the low ones for a human. It runs apart from generation and only reads and annotates in Phoenix. See [DRAFT-EVALS.md](DRAFT-EVALS.md).
+Each attempt of `write_draft` also emits a `draft` span (the fact sheet and doc plan in, the draft out, the retrieved chunks as `retrieval.documents`, and a bounded record of the source
+snapshot: `multisync.source.text` clipped to `DRAFT_SOURCE_CHARS`, default 30,000, omitted when `PHOENIX_CAPTURE_CONTENT=0`, plus hash and file paths). A nightly
+CronJob scores those spans with the cheap-tier model against the same evidence the writer had and attaches a `draft_faithfulness` evaluation to each one (the share
+of supported claims, 0..1: faithful >= 0.9, partial >= 0.7, unfaithful below; metadata has the counts, the unsupported quotes and `evidence: source+chunks | chunks_only`); `multisync evals
+flag-low-scores` lists the low ones for a human. Before trusting the nightly job, run `python -m multisync.evals.run_draft_evals --sample 10 --dry-run` (evidence sizes, no model call) and `--sample 10 --explain` (scores with quotes, nothing written). It runs apart from generation and only reads and annotates in Phoenix. See [DRAFT-EVALS.md](DRAFT-EVALS.md).
 
 ### Review outcomes and confidence floors (every 6 hours)
 

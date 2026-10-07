@@ -59,14 +59,23 @@ class FakeClient:
         self.spans = FakeSpans(rows, scores)
 
 
+REPLIES = {"faithful": json.dumps({"claims": 4, "unsupported": [], "explanation": "because"}),
+           "unfaithful": json.dumps({"claims": 4, "unsupported": ["q1", "q2", "q3", "q4"], "explanation": "because"})}
+
+
 def judge_llm(verdicts):
-    """A cheap-tier model that answers with the next verdict: 'faithful' or 'unfaithful'."""
+    """A cheap-tier model that answers with the next reply: 'faithful' / 'unfaithful' (strict JSON) or any raw text."""
     seen = iter(verdicts)
+    prompts = []
 
     def handler(request):
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"label": next(seen), "explanation": "because"})}}], "usage": {}})
+        prompts.append(json.loads(request.content)["messages"][-1]["content"])
+        v = next(seen)
+        return httpx.Response(200, json={"choices": [{"message": {"content": REPLIES.get(v, v)}}], "usage": {}})
 
-    return LLM(load_config({"INTERNAL_AI_API_KEY": "k", "DEEPSEEK_API_KEY": "d"})["ai"], httpx.MockTransport(handler))
+    llm = LLM(load_config({"INTERNAL_AI_API_KEY": "k", "DEEPSEEK_API_KEY": "d"})["ai"], httpx.MockTransport(handler))
+    llm.prompts = prompts
+    return llm
 
 
 # ── the draft span the pipeline emits ────────────────────────────────────────
@@ -123,10 +132,14 @@ def test_build_inputs_skips_what_cannot_be_judged_and_says_why():
 
 
 def test_annotations_from_scores_attach_to_the_span_id_and_drop_rows_the_judge_failed_on():
-    ok = json.dumps({"name": "faithfulness", "score": 0.0, "label": "unfaithful", "explanation": "invented", "metadata": {"model": "deepseek-v4-pro"}})
-    out, failed = de.annotations_from_scores([{"span_id": "s1", "change_unit_id": "u", "faithfulness_score": ok}, {"span_id": "s2", "faithfulness_score": None}], "faithfulness_score")
-    assert failed == ["s2"] and out == [{"span_id": "s1", "name": de.EVAL_NAME, "annotator_kind": "LLM", "label": "unfaithful", "score": 0.0, "explanation": "invented",
-                                         "metadata": {"judge": "deepseek-v4-pro", "change_unit_id": "u"}}]
+    res = de.parse_verdict('{"claims": 4, "unsupported": ["invented flag"], "explanation": "one"}')
+    res["model"] = "deepseek-v4-pro"
+    out, failed = de.annotations_from_scores([{"span_id": "s1", "change_unit_id": "u", "evidence": "source+chunks", "evidence_chars": 99, "faithfulness_score": res},
+                                              {"span_id": "s2", "faithfulness_score": None}], "faithfulness_score")
+    assert failed == ["s2"] and len(out) == 1
+    a = out[0]
+    assert (a["span_id"], a["name"], a["label"], a["score"]) == ("s1", de.EVAL_NAME, "partial", 0.75) and a["explanation"] == "one"
+    assert a["metadata"] == {"judge": "deepseek-v4-pro", "change_unit_id": "u", "claims": 4, "unsupported": 1, "quotes": ["invented flag"], "evidence": "source+chunks", "evidence_chars": 99, "notes": []}
 
 
 def test_flag_low_lists_only_scores_below_the_threshold_worst_first_with_a_link():
@@ -143,7 +156,7 @@ def test_flag_low_lists_only_scores_below_the_threshold_worst_first_with_a_link(
 
 # ── the judge ────────────────────────────────────────────────────────────────
 def test_the_judge_goes_through_the_pipelines_cheap_tier_and_validates_the_label():
-    j = PipelineJudge(judge_llm(["faithful", "maybe"]))
+    j = PipelineJudge(judge_llm(['{"label": "faithful", "explanation": "because"}', '{"label": "maybe"}']))
     assert j.model == "deepseek-v4-pro"
     assert j.generate_classification("is it?", ["faithful", "unfaithful"]) == {"label": "faithful", "explanation": "because"}
     with pytest.raises(ValueError):
@@ -181,7 +194,8 @@ def test_a_rerun_overwrites_the_same_evaluation_names_on_the_same_span_ids():
 def test_dry_run_calls_no_model_and_logs_nothing(capsys):
     client = FakeClient([span("s1")])
     assert run_draft_evals.run(["--dry-run"], env=ENV, client=client, judge=None) == 0
-    assert client.spans.logged == {} and "1 evaluable" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert client.spans.logged == {} and "1 evaluable" in out and "evidence chunks_only" in out and "s1" in out
 
 
 def test_max_spans_caps_what_reaches_the_judge():
@@ -232,3 +246,178 @@ def test_the_multisync_entry_point_dispatches_evals(monkeypatch, capsys):
 
     monkeypatch.setattr(evals_cli, "run", lambda argv, **kw: (0, "listed"))
     assert main(["evals", "flag-low-scores"]) == 0 and "listed" in capsys.readouterr().out
+
+
+# ── evidence parity, strict judge, calibration ──────────────────────────────
+SNAPSHOT = ("### FILE: receiver/webhook.py\nThe webhook receiver uses only the standard library: http.server, no httpx.\n\n"
+            "### FILE: multisync/pipeline.py\nThe pipeline is a LangGraph state graph and calls models with httpx.\n\n")
+
+
+def with_source(row, snapshot=SNAPSHOT, changed=("multisync/pipeline.py",), **kw):
+    return {**row, **tracing.source_attrs(snapshot, list(changed), **kw)}
+
+
+def judge_by_evidence():
+    """A fake judge that only 'knows' what is in the prompt: the claim is supported when the evidence part contains the words it relies on."""
+    class J:
+        model = "fake"
+
+        def complete(self, prompt):
+            evidence = prompt.split("=== EVIDENCE ===")[1].split("=== DRAFT TO CHECK ===")[0]
+            ok = "LangGraph state graph" in evidence
+            return json.dumps({"claims": 2, "unsupported": [] if ok else ["The system uses LangGraph and httpx"], "explanation": "x"})
+    return J()
+
+
+def test_source_attrs_are_bounded_changed_files_first_and_hash_the_whole_snapshot():
+    big = "### FILE: a.py\n" + "x" * 500 + "\n\n### FILE: b.py\n" + "y" * 500 + "\n"
+    a = tracing.source_attrs(big, ["b.py"], budget=300, capture=True)
+    assert a["multisync.source.chars"] == len(big) and len(a["multisync.source.sha256"]) == 64
+    assert json.loads(a["multisync.source.files"]) == ["a.py", "b.py"] and json.loads(a["multisync.source.changed_files"]) == ["b.py"]
+    text = a["multisync.source.text"]
+    assert text.startswith("### FILE: b.py") and "y" * 100 in text and "x" * 50 not in text and "more characters not recorded" in text and len(text) < 450
+    assert tracing.source_attrs("short", budget=300, capture=True)["multisync.source.text"].startswith("### FILE: (source)")
+
+
+def test_content_capture_switch_off_records_no_source_text_only_paths_and_a_hash(monkeypatch):
+    monkeypatch.setenv("PHOENIX_CAPTURE_CONTENT", "0")
+    assert tracing.content_capture_enabled() is False
+    a = tracing.source_attrs(SNAPSHOT, ["multisync/pipeline.py"])
+    assert "multisync.source.text" not in a and a["multisync.source.sha256"] and "receiver/webhook.py" in a["multisync.source.files"]
+    monkeypatch.delenv("PHOENIX_CAPTURE_CONTENT")
+    assert tracing.content_capture_enabled() is True and "multisync.source.text" in tracing.source_attrs(SNAPSHOT)
+
+
+def test_the_budget_env_knob_sets_the_default(monkeypatch):
+    monkeypatch.setenv("DRAFT_SOURCE_CHARS", "40")
+    assert len(tracing.source_attrs("### FILE: a\n" + "z" * 500, capture=True)["multisync.source.text"]) < 120
+    monkeypatch.setenv("DRAFT_SOURCE_CHARS", "junk")
+    assert tracing.source_budget() == tracing.SOURCE_BUDGET
+
+
+def test_the_pipeline_draft_span_records_the_source_and_respects_the_privacy_switch(spans, monkeypatch):
+    change = {"repo": "o/r", "filePath": "docs/a.md", "commit": "abc1234def", "before": DOC_V1, "after": DOC_V2}
+    process_change(change, make_deps(llm=fake_llm([PASS_JUDGE])))
+    a = next(s for s in spans.get_finished_spans() if s.name == "draft").attributes
+    assert a["multisync.source.text"].strip() and a["multisync.source.sha256"] and a["multisync.source.chars"] == len(DOC_V2)
+    spans.clear()
+    monkeypatch.setenv("PHOENIX_CAPTURE_CONTENT", "0")
+    process_change(change, make_deps(llm=fake_llm([PASS_JUDGE])))
+    a = next(s for s in spans.get_finished_spans() if s.name == "draft").attributes
+    assert "multisync.source.text" not in a and a["multisync.source.sha256"]
+
+
+def test_evidence_includes_the_source_the_chunks_and_flags_the_kind():
+    rows, _ = de.build_inputs([with_source(span("s1"))])
+    r = rows[0]
+    assert r["evidence"] == "source+chunks" and r["source_files"] == 2 and r["chunks"] == 2
+    assert "[SOURCE FILES (changed in this commit: multisync/pipeline.py)]" in r["context"] and "[chunk 1]" in r["context"]
+    assert r["evidence_chars"] == len(r["context"]) and "documents this component only" in r["prompt"] and "docs/a.md" in r["prompt"] and "o/r" in r["prompt"]
+
+
+def test_privacy_off_span_degrades_to_chunks_only_and_the_annotation_says_so(monkeypatch):
+    monkeypatch.setenv("PHOENIX_CAPTURE_CONTENT", "0")
+    rows, _ = de.build_inputs([with_source(span("s1"))])
+    assert rows[0]["evidence"] == "chunks_only" and rows[0]["source_hash_only"] and "SOURCE FILES" not in rows[0]["context"]
+    ann, _ = de.annotations_from_scores(de.evaluate(rows, judge_by_evidence())[0], "faithfulness_score")
+    assert ann[0]["metadata"]["evidence"] == "chunks_only" and "source_not_recorded" in ann[0]["metadata"]["notes"]
+
+
+def test_old_spans_without_the_new_attributes_still_evaluate_on_chunks_only():
+    rows, skipped = de.build_inputs([span("old")])
+    assert skipped == [] and rows[0]["evidence"] == "chunks_only"
+    ann, failed = de.annotations_from_scores(de.evaluate(rows, PipelineJudge(judge_llm(["faithful"])))[0], "faithfulness_score")
+    assert failed == [] and ann[0]["metadata"]["evidence"] == "chunks_only" and "old_span_without_source" in ann[0]["metadata"]["notes"] and ann[0]["score"] == 1.0
+
+
+def test_a_source_only_span_without_chunks_is_evaluable():
+    rows, _ = de.build_inputs([with_source(span("s1", docs=[]))])
+    assert len(rows) == 1 and rows[0]["evidence"] == "source+chunks" and rows[0]["chunks"] == 0
+
+
+def test_false_positive_a_statement_supported_only_by_the_source_snapshot_is_faithful_with_it_and_unfaithful_without():
+    """Production false positive: the chunks come from another component (the webhook receiver, stdlib only); what supports the page's claim is in the source."""
+    other_component_chunks = [{"document.content": "The webhook receiver uses only the standard library."}]
+    base = span("s1", output="The system is a LangGraph state graph that uses httpx.", docs=other_component_chunks)
+    judge = judge_by_evidence()
+    for row, expected in ((with_source(base), ("faithful", 1.0)), (base, ("unfaithful", 0.5))):
+        built, _ = de.build_inputs([row])
+        ann, _ = de.annotations_from_scores(de.evaluate(built, judge)[0], "faithfulness_score")
+        assert (ann[0]["label"], ann[0]["score"]) == expected
+    assert ann[0]["metadata"]["quotes"] == ["The system uses LangGraph and httpx"] and ann[0]["metadata"]["evidence"] == "chunks_only"
+
+
+def test_parse_verdict_accepts_fenced_json_and_computes_the_share_of_supported_claims():
+    r = de.parse_verdict('```json\n{"claims": 10, "unsupported": ["a", "b"], "explanation": "e"}\n```')
+    assert (r["claims"], r["unsupported_count"], r["score"], r["label"], r["unsupported"]) == (10, 2, 0.8, "partial", ["a", "b"])
+    assert de.parse_verdict('Sure: {"claims": 3, "unsupported": []}')["label"] == "faithful"
+    assert de.parse_verdict('{"claims": 0, "unsupported": []}')["notes"] == ["no_claims_judged"]
+    assert de.parse_verdict('{"claims": 2, "unsupported": 1}')["score"] == 0.5
+
+
+def test_parse_verdict_maps_a_bare_label_with_a_note_and_rejects_malformed_replies():
+    r = de.parse_verdict("unfaithful")
+    assert (r["score"], r["label"], r["notes"], r["claims"]) == (0.0, "unfaithful", ["judge_replied_with_label_only"], None)
+    assert de.parse_verdict("`Faithful`.")["score"] == 1.0
+    for bad in ("", "I think it is mostly fine", '{"claims": "many"}', '{"label": "faithful"}', "{broken"):
+        with pytest.raises(ValueError):
+            de.parse_verdict(bad)
+
+
+def test_label_thresholds():
+    assert [de.label_for(x) for x in (1.0, 0.9, 0.89, 0.7, 0.69, 0.0)] == ["faithful", "faithful", "partial", "partial", "unfaithful", "unfaithful"]
+
+
+def test_one_borderline_claim_no_longer_flips_the_whole_draft():
+    r = de.parse_verdict('{"claims": 12, "unsupported": ["one iffy claim"]}')
+    assert r["score"] > 0.9 and r["label"] == "faithful"
+
+
+def test_the_judge_is_retried_once_on_a_malformed_reply_then_given_up_on():
+    llm = judge_llm(["not json at all", REPLIES["faithful"]])
+    rows, _ = de.build_inputs([span("s1")])
+    res = de.judge_row(rows[0], PipelineJudge(llm))
+    assert res["score"] == 1.0 and len(llm.prompts) == 2 and "previous reply was not the required JSON" in llm.prompts[1]
+    llm = judge_llm(["nope", "still nope", REPLIES["faithful"]])
+    assert de.judge_row(rows[0], PipelineJudge(llm)) is None and len(llm.prompts) == 2
+
+
+def test_a_bare_label_is_accepted_without_any_retry():
+    llm = judge_llm(["Unfaithful."])
+    res = de.judge_row(de.build_inputs([span("s1")])[0][0], PipelineJudge(llm))
+    assert res["notes"] == ["judge_replied_with_label_only"] and len(llm.prompts) == 1
+
+
+def test_sample_dry_run_prints_evidence_sizes_calls_no_model_and_writes_nothing(capsys):
+    client = FakeClient([with_source(span(f"s{i}", page=f"p{i}.md")) for i in range(6)] + [span("old", page="old.md")])
+    assert run_draft_evals.run(["--sample", "3", "--dry-run"], env=ENV, client=client, judge=None) == 0
+    out = capsys.readouterr().out
+    assert "3 evaluable" in out and "evidence source+chunks" in out and "chars (2 source files" in out and client.spans.logged == {}
+
+
+def test_explain_prints_scores_with_quotes_and_never_logs(capsys):
+    client = FakeClient([with_source(span("s1"))])
+    reply = json.dumps({"claims": 5, "unsupported": ["it needs Redis"], "explanation": "Redis is not mentioned"})
+    assert run_draft_evals.run(["--explain"], env=ENV, client=client, judge=PipelineJudge(judge_llm([reply]))) == 0
+    out = capsys.readouterr().out
+    assert "0.80 partial" in out and "unsupported: it needs Redis" in out and "evidence source+chunks" in out and client.spans.logged == {}
+
+
+def test_the_script_logs_label_counts_and_quotes_in_the_metadata():
+    captured = []
+    client = FakeClient([with_source(span("s1")), span("old", page="o.md")])
+    reply = json.dumps({"claims": 4, "unsupported": ["bad claim"]})
+    run_draft_evals.run([], env=ENV, client=client, judge=PipelineJudge(judge_llm([reply, reply])), log=lambda c, ann: captured.extend(ann) or len(ann))
+    by = {a["span_id"]: a for a in captured}
+    assert by["s1"]["label"] == "partial" and by["s1"]["score"] == 0.75 and by["s1"]["metadata"]["claims"] == 4 and by["s1"]["metadata"]["unsupported"] == 1
+    assert by["s1"]["metadata"]["quotes"] == ["bad claim"] and by["s1"]["metadata"]["evidence"] == "source+chunks"
+    assert by["old"]["metadata"]["evidence"] == "chunks_only"
+
+
+def test_flag_low_scores_shows_quotes_counts_and_the_weaker_chunks_only_note():
+    meta = {"claims": 4, "unsupported": 3, "quotes": ["invented flag --x"], "evidence": "chunks_only"}
+    client = FakeClient([span("s1")], {"s1": {"annotation_name": de.EVAL_NAME, "result.score": 0.25, "result.label": "unfaithful", "result.explanation": "bad", "metadata": meta}})
+    code, text = evals_cli.run(["flag-low-scores"], env=ENV, client=client, facts=MemoryFactStore())
+    assert code == 0 and "3 of 4 claims unsupported" in text and "weaker score: chunks only" in text and "quote  invented flag --x" in text
+    code, text = evals_cli.run(["flag-low-scores"], env={**ENV, "DRAFT_EVALS_THRESHOLD": "0.2"}, client=client, facts=MemoryFactStore())
+    assert "no draft scored below 0.2" in text
