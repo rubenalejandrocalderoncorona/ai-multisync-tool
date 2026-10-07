@@ -8,4 +8,5 @@ resources:
   - migrate-job.yaml
   - webhook.yaml
   - phoenix.yaml
+  - draft-evals-cronjob.yaml
 # NOT listed on purpose: secrets.example.yaml.

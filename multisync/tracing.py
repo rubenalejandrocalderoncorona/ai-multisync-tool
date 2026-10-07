@@ -5,6 +5,8 @@ Off unless PHOENIX_COLLECTOR_ENDPOINT is set (for example http://phoenix.multire
     node:<name>                      one span per LangGraph node (CHAIN), with the node's decision data
       llm:<tier> <model>             one span per model call (LLM): messages, answer, tokens, cost
       embeddings                     one span per embedding call (EMBEDDING)
+      draft                          the model-written page of one write_draft attempt: input = fact sheet + doc plan, output = the draft, retrieval.documents = the
+                                     retrieved chunks (what the nightly evaluator scores, see docs/DRAFT-EVALS.md)
 Spans are grouped into a session per run (session.id = run id) and into the Phoenix project PHOENIX_PROJECT_NAME. PHOENIX_API_KEY, when set, is
 sent as a bearer token. Nothing here can fail a run: any tracing error is swallowed. When tracing is off, `span()` costs a function call.
 """
@@ -22,6 +24,18 @@ MAX_TEXT = 12000
 def _clip(value, limit: int = MAX_TEXT) -> str:
     text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + f"\n...[{len(text) - limit} more characters not sent]"
+
+
+def document_attrs(docs: list[dict], limit: int = 12, chars: int = 1500) -> dict:
+    """OpenInference retrieval.documents.<i>.document.* attributes for the chunks a step read. Bounded: `limit` chunks, `chars` characters each."""
+    out: dict = {}
+    for i, d in enumerate(docs[:limit]):
+        out[f"retrieval.documents.{i}.document.content"] = _clip(d.get("content") or "", chars)
+        if d.get("id") is not None:
+            out[f"retrieval.documents.{i}.document.id"] = str(d["id"])
+        if isinstance(d.get("score"), (int, float)):
+            out[f"retrieval.documents.{i}.document.score"] = float(d["score"])
+    return out
 
 
 def configure(endpoint: str | None = None, exporter=None, project: str | None = None, api_key: str | None = None) -> bool:

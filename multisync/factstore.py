@@ -158,6 +158,11 @@ class PgFactStore:
              r.get("reviewed_by"), r.get("reviewed_at"), r["policy_version"], r["pr_url"]))
         return bool(rows)
 
+    def pr_urls(self, change_unit_ids) -> dict:
+        """The review PR of each change unit, where review_outcomes has one (a PR still open has no row yet)."""
+        rows = self._q("SELECT change_unit_id, pr_url FROM review_outcomes WHERE change_unit_id = ANY(%s) ORDER BY id", (list(change_unit_ids),))
+        return {r["change_unit_id"]: r["pr_url"] for r in rows}
+
     def review_outcome_counts(self, diff_classification, model_tier, policy_version=None) -> dict:
         sql = ("SELECT count(*)::int AS n, count(*) FILTER (WHERE outcome='draft_with_noedition')::int AS noedition, "
                "count(*) FILTER (WHERE outcome='draft_with_edition')::int AS edition, count(*) FILTER (WHERE outcome='draft_rejected')::int AS rejected "
@@ -308,6 +313,10 @@ class MemoryFactStore:
                 and (not policy_version or x["policy_version"] == policy_version)]
         return {"sampled": sum(1 for x in rows if x.get("audit_sampled")), "audited": sum(1 for x in rows if x.get("audit_verified_accurate") is not None),
                 "accurate": sum(1 for x in rows if x.get("audit_verified_accurate"))}
+
+    def pr_urls(self, change_unit_ids):
+        want = set(change_unit_ids)
+        return {x["change_unit_id"]: x["pr_url"] for x in getattr(self, "review_outcomes", []) if x["change_unit_id"] in want}
 
     def review_outcome_counts(self, diff_classification, model_tier, policy_version=None):
         rows = [x for x in getattr(self, "review_outcomes", []) if x["diff_classification"] == diff_classification and x["model_tier_used"] == model_tier

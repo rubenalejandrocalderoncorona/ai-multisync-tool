@@ -17,6 +17,8 @@ multisync = "multisync.cli.main:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# The nightly draft evaluator (docs/DRAFT-EVALS.md). Kept out of the runtime image; the Dockerfile `evals` target installs requirements-evals.txt.
+evals = ["arize-phoenix-client>=3.5", "arize-phoenix-evals>=3.9", "pandas>=2.2"]
 
 [tool.setuptools.packages.find]
 include = ["multisync*"]

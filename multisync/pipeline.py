@@ -375,27 +375,33 @@ def process_change(change: dict, deps) -> dict:
                       plan=plan_text(s["plan"]), context=context, policy=policy, style=style, instructions=instructions, feedback=[*(change.get("reviewFeedback") or []), *s["feedback"]], tier=s["tier"])
         note = {"attempt": s["iter"] + 1, "tier": s["tier"], "escalated": s["escalated"], "widened": s["widened"], "topK": top_k, "contextChunks": len(context),
                 "feedbackItems": len(s["feedback"]), "style": style["key"]}
-        base = None if s.get("patchFallback") else patch_base()
-        metrics: dict = {"patchMode": False} if mode == "code" else {}
-        patch_state = None
-        out = None
-        if base is not None:
-            sections = patching.split_sections(base)
-            try:
-                names = ((s.get("routeInfo") or {}).get("signals") or {}).get("publicChanged") or []
-                p_out = W.patch_document(llm, sections=sections, changed_symbols=names, diff_text=patching.source_diff(change.get("before"), change["after"], changed_files), **common)
-                ch = p_out["changed"]
-                n_changed = len(set(ch["replaced"]) | set(ch["deleted"]))
-                out = {"text": p_out["text"], "promptId": p_out["promptId"]}
-                patch_state = {"base": base, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "diffLines": diff_line_count(change.get("before"), change["after"])["total"]}
-                metrics = {"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed}
-                note.update({"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "inserted": len(ch["inserted"]),
-                             **({"unchangedReason": p_out["unchangedReason"]} if p_out["unchangedReason"] else {})})
-            except (patching.PatchError, ValueError) as err:
-                note.update({"patchFallback": True, "patchError": str(err)[:200]})
-                metrics = {"patchMode": False, "patchFallback": True, "sectionsTotal": None, "sectionsChanged": None, "retainedPct": None}
-        if out is None:
-            out = W.draft_document(llm, mode=mode, existing=change.get("existing") or "", template_path=s.get("templatePath"), **common)
+        with tracing.span("draft", "CHAIN", **{"session.id": run_id, "multisync.repo": change["repo"], "multisync.page": change["filePath"], "multisync.commit": change["commit"],
+                                              "multisync.change_unit_id": f"{change['repo']}@{change['commit']}:{change['filePath']}", "multisync.mode": mode,
+                                              "multisync.attempt": s["iter"] + 1, "multisync.tier": s["tier"],
+                                              **tracing.document_attrs([{"id": c["id"], "content": c["text"], "score": c["score"]} for c in context])}) as dsp:
+            dsp.io(input=f"## Fact sheet\n{common['fact_sheet']}\n\n## Doc plan\n{common['plan']}")
+            base = None if s.get("patchFallback") else patch_base()
+            metrics: dict = {"patchMode": False} if mode == "code" else {}
+            patch_state = None
+            out = None
+            if base is not None:
+                sections = patching.split_sections(base)
+                try:
+                    names = ((s.get("routeInfo") or {}).get("signals") or {}).get("publicChanged") or []
+                    p_out = W.patch_document(llm, sections=sections, changed_symbols=names, diff_text=patching.source_diff(change.get("before"), change["after"], changed_files), **common)
+                    ch = p_out["changed"]
+                    n_changed = len(set(ch["replaced"]) | set(ch["deleted"]))
+                    out = {"text": p_out["text"], "promptId": p_out["promptId"]}
+                    patch_state = {"base": base, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "diffLines": diff_line_count(change.get("before"), change["after"])["total"]}
+                    metrics = {"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed}
+                    note.update({"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "inserted": len(ch["inserted"]),
+                                 **({"unchangedReason": p_out["unchangedReason"]} if p_out["unchangedReason"] else {})})
+                except (patching.PatchError, ValueError) as err:
+                    note.update({"patchFallback": True, "patchError": str(err)[:200]})
+                    metrics = {"patchMode": False, "patchFallback": True, "sectionsTotal": None, "sectionsChanged": None, "retainedPct": None}
+            if out is None:
+                out = W.draft_document(llm, mode=mode, existing=change.get("existing") or "", template_path=s.get("templatePath"), **common)
+            dsp.io(output=out["text"])
         update = {"iter": s["iter"] + 1, "polished": False, "draft": out["text"], "escalatePending": False, "verifyFailed": False, "patch": patch_state,
                   **({"patchFallback": True} if note.get("patchFallback") else {}), **({"metrics": metrics} if metrics else {})}
         return {"note": {**note, "prompt": out["promptId"]}, "update": update}
