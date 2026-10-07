@@ -228,3 +228,52 @@ def test_qdrant_transient_failures_are_retried_a_400_is_not():
     with pytest.raises(RuntimeError, match="-> 503"):
         q3._req("POST", "/x", {}, retries=2)
     assert always["i"] == 3, "1 try + 2 retries"
+
+
+def test_parse_json_repairs_an_unescaped_quote_inside_a_claim_and_a_trailing_comma():
+    broken = '{"claims": [{"claim": "The route "GET /api/v1/events" returns a page", "supported": true},], "facts": []}'
+    r = parse_json(broken)
+    assert r["claims"][0]["claim"] == 'The route "GET /api/v1/events" returns a page' and r["facts"] == []
+    assert parse_json('```json\n{"a": [1, 2,],}\n```') == {"a": [1, 2]}
+
+
+def test_parse_json_leaves_valid_json_untouched_and_still_rejects_garbage():
+    assert parse_json('{"a": "x, \\"y\\": z"}') == {"a": 'x, "y": z'}
+    import pytest
+
+    with pytest.raises(ValueError):
+        parse_json("not json at all")
+    with pytest.raises(ValueError):
+        parse_json('{"a": ')
+
+
+def test_chat_json_asks_for_json_mode_and_falls_back_when_the_endpoint_rejects_it():
+    import json as _json
+
+    bodies = []
+
+    def handler(request):
+        b = _json.loads(request.content)
+        bodies.append(b)
+        if "response_format" in b:
+            return httpx.Response(400, text='{"error": "unsupported parameter: response_format"}')
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    llm = LLM(AI, httpx.MockTransport(handler))
+    assert llm.chat_json([{"role": "user", "content": "hi"}]) == {"ok": True}
+    assert "response_format" in bodies[0] and "response_format" not in bodies[1]
+    assert llm.chat_json([{"role": "user", "content": "again"}]) == {"ok": True}
+    assert len(bodies) == 3 and "response_format" not in bodies[2]  # remembered: not asked for again
+
+
+def test_chat_json_sends_json_mode_when_the_endpoint_accepts_it():
+    import json as _json
+
+    seen = []
+
+    def handler(request):
+        seen.append(_json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"a": 1}'}}]})
+
+    LLM(AI, httpx.MockTransport(handler)).chat_json([{"role": "user", "content": "hi"}])
+    assert seen[0]["response_format"] == {"type": "json_object"}
