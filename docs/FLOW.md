@@ -48,7 +48,7 @@ flowchart TD
 ## 4. Per page: the LangGraph pipeline (`multisync/pipeline.py`)
 | # | Node | What it does | Ends the page with |
 |---|---|---|---|
-| 1 | prefilter | Diff smaller than 3 lines is not worth a draft unless forced. A removed source produces a delete decision. | `skipped` |
+| 1 | prefilter | A diff under 3 lines is dropped (`trivial_diff`) unless it changes documented facts: a number (underscore numbers like `10_000` count), a duration (`30m`, `72h`), backticked text, an upper-case constant, a public symbol or the page shape, or removes a string literal that the existing page quotes (error message, header name). Those are processed and forced past the similarity stop. Wording-only changes are dropped. A removed source produces a delete decision. | `skipped` |
 | 2 | cross_repo | Two kinds of contract point. Manual: the change mentions a symbol of the cross-repo registry, every repo owning that feature must have it. Automatic (`linkedRepos`): a route the change added or modified that a linked repo calls (`client_call` symbol, matched on the normalised path) needs that repo to have an approved document mentioning its call. Nobody calls the route: nothing to wait for. Provider side only; `crossRepoGate` off/warn/block (env `CROSS_REPO_GATE` wins). | `fallback: cross_repo_incomplete` |
 | 3 | route | Free, no model: classify `internal` vs `public_interface` (changed public symbol, route, config key, registry hit, or symbol other docs mention) and pick the tier: cheap or expensive. | |
 | 4 | similarity | Embed a hypothetical paragraph of what the docs would say, compare to the approved page. Similarity at least 0.92 means the page already says it. | `refreshed` (page re-keyed, no PR) |

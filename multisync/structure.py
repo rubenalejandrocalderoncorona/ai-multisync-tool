@@ -40,6 +40,8 @@ def signature(content: str | None) -> dict:
     tokens |= set(re.findall(r"https?://[^\s)>\"']+", text))
     tokens |= set(re.findall(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b", text))
     tokens |= set(re.findall(r"\b\d+(?:\.\d+)*\b", text))
+    tokens |= set(re.findall(r"\b\d+(?:\.\d+)?(?:ms|s|sec|m|min|h|hr|d)\b", text))  # durations: 30m, 72h, 500ms
+    tokens |= {n.replace("_", "") for n in re.findall(r"\b\d{1,3}(?:_\d{3})+\b", text)}  # 10_000 is the number 10000 (an underscore hides it from \b\d+\b)
     return {"headings": headings, "fences": fences, "tableRows": table_rows, "listItems": list_items,
             "functions": sorted(functions), "arrays": arrays, "tokens": sorted(tokens)}
 

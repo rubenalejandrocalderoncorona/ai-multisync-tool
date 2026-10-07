@@ -232,7 +232,7 @@ def process_change(change: dict, deps) -> dict:
                         "outcome": "published" if auto else "pending_review", "reviewerAction": "auto_published" if auto else "needs_review",
                         "reason": "source document removed", "action": "delete",
                         "targetPath": target_path_for(change["filePath"], policy, cfg["paths"]["docsRoot"])})}}
-        pre = prefilter(change.get("before") or "", change["after"], t["minDiffLines"])
+        pre = prefilter(change.get("before") or "", change["after"], t["minDiffLines"], change.get("existing") or "")
         update = {"metrics": {"prefilter": pre["metrics"]}, "forced": pre["forced"]}
         if not pre["proceed"]:
             return {"status": "stop", "note": {"tag": pre.get("tag"), "reason": pre["reason"], **pre["metrics"]["diff"]},
