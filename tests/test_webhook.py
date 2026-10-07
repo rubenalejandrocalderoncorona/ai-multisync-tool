@@ -206,3 +206,16 @@ def test_a_duplicate_job_creation_is_not_an_error(monkeypatch):
     c = cfg()
     c.api_base = "https://k"
     assert webhook.create_job(c, {"metadata": {"name": "multisync-revise-9-555"}}) == "multisync-revise-9-555"
+
+
+def test_dispatch_can_limit_and_force_pages():
+    payload = {"client_payload": {"repository": "cAImanLabs/Calendar", "sha": "abc1234", "only_pages": ["buyer-flow.md", "../x.md", "a b.md", "ok-2.md"], "force_pages": True}}
+    j, why = plan(cfg(), "repository_dispatch", payload)
+    assert j and j["only_pages"] == ["buyer-flow.md", "ok-2.md"] and j["force_pages"] is True, why
+    env = {x["name"]: x["value"] for x in job_manifest(cfg(), j, now=1)["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["ONLY_PAGES"] == "buyer-flow.md,ok-2.md" and env["FORCE_PAGES"] == "1"
+    payload["client_payload"].pop("only_pages")
+    j, _ = plan(cfg(), "repository_dispatch", payload)
+    assert j["only_pages"] == [] and j["force_pages"] is False
+    env = {x["name"]: x["value"] for x in job_manifest(cfg(), j, now=1)["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert "ONLY_PAGES" not in env and "FORCE_PAGES" not in env
