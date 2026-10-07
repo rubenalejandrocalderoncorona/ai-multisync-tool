@@ -115,7 +115,7 @@ spec:
           command: ["python", "-m", "multisync.webhook"]
           ports: [{ containerPort: 8080 }]
           env:
-            - { name: ALLOWED_REPOS, value: "cAImanLabs/cAImanLabsCalendarScheduler,cAImanLabs/hermes-operations-console,cAImanLabs/socialmedia-ai-e2e-pipelines,rubenalejandrocalderoncorona/agent-trace-lint,rubenalejandrocalderoncorona/raibis-lifeos,rubenalejandrocalderoncorona/rurag,rubenalejandrocalderoncorona/SuperGit,rubenalejandrocalderoncorona/flare-optimizer-v2,Fidavia/fidavia,Fidavia/fidavia-frontend" }   # source repos that may trigger a sync (keep in step with config/repos.json). ai-multisync-tool is NOT listed on purpose: every merge to its main would run a paid sync of its own pages (about $1 to $2 per merge); sync it by hand when its docs need refreshing.
+            - { name: ALLOWED_REPOS, value: "rubenalejandrocalderoncorona/SuperGit,rubenalejandrocalderoncorona/flare-optimizer-v2,Fidavia/fidavia,Fidavia/fidavia-frontend" }   # source repos that may trigger a sync (keep in step with config/repos.json). ai-multisync-tool is NOT listed on purpose: every merge to its main would run a paid sync of its own pages (about $1 to $2 per merge); sync it by hand when its docs need refreshing. Repos that are onboarded in config/repos.json but not listed here (CalendarScheduler, hermes-operations-console, socialmedia-ai-e2e-pipelines, agent-trace-lint, raibis-lifeos, rurag) keep their published pages and are synced by hand; add one back here to resume automatic syncs on push.
             - { name: CENTRAL_REPO, value: "rubenalejandrocalderoncorona/multirepo-agent-docs" }
             - { name: TARGET_BRANCH, value: "qa" }
             - { name: JOB_IMAGE, value: "__PIPELINE_IMAGE__" }
