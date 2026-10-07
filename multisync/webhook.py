@@ -39,6 +39,7 @@ MAX_FILES_SIZE = 16 << 10
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REF_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
+PAGE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]{0,120}\.md$")  # a declared page path, e.g. buyer-flow.md
 FILE_RE = re.compile(r"^[A-Za-z0-9_@+=,. /-]+$")
 ZERO_RE = re.compile(r"^0+$")
 LOGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$")
@@ -145,7 +146,11 @@ def plan(cfg: Config, event: str, p: dict) -> tuple[dict | None, str]:
         before = cp.get("before", "")
         if not SHA_RE.match(before):
             before = ""
-        return {"mode": "sync", "source_repo": repo, "sha": sha, "before": before, "target": target, "files": clean_files((cp.get("changed_files") or "").split())}, ""
+        # only_pages: draft just these declared pages (the context is still loaded for all of them); force_pages: draft them even if their files did not change
+        raw = cp.get("only_pages") or []
+        only = [x.strip() for x in (raw.split(",") if isinstance(raw, str) else raw) if isinstance(x, str) and PAGE_RE.match(x.strip()) and ".." not in x]
+        return {"mode": "sync", "source_repo": repo, "sha": sha, "before": before, "target": target, "files": clean_files((cp.get("changed_files") or "").split()),
+                "only_pages": only[:20], "force_pages": bool(cp.get("force_pages")) and bool(only)}, ""
     if event == "pull_request":
         if full_name.lower() != cfg.central.lower():
             return None, "not the central repository"
@@ -244,6 +249,10 @@ def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
            e("QDRANT_URL", cfg.qdrant_url), e("HOME", "/work")]
     if j.get("full"):
         env.append(e("FULL_SYNC", "1"))
+    if j.get("only_pages"):
+        env.append(e("ONLY_PAGES", ",".join(j["only_pages"])))
+        if j.get("force_pages"):
+            env.append(e("FORCE_PAGES", "1"))
     pr = j.get("pr")
     if pr:  # review-outcome logging (modes index and review)
         env += [e("PR_NUMBER", str(pr["number"] or "")), e("PR_URL", pr["url"]), e("PR_MERGED", "true" if pr["merged"] else "false"), e("REVIEWED_BY", pr["by"]), e("REVIEWED_AT", pr["at"])]
