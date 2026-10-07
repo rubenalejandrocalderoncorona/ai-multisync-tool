@@ -75,6 +75,13 @@ When the change unit has an existing page and the run is incremental (a previous
 
 Every decision, per-node log and cost is written to the FactStore (`decisions`, `node_logs`) and traced to Phoenix.
 
+### Cost ceilings (safety net)
+Two thresholds cap spend; `0` disables either. Spend is the sum of `usd` over the LLM tiers (draft, judge, context stages, retries), so it is the same figure the cost trail reports. They only ever stop work; a run that stays under them produces exactly what it did before. Both feed `policy_version`.
+- `MAX_PAGE_USD` (default `1.50`): checked before every attempt that would call the writer (the return to `write_draft`, the free expensive-tier redo, and `widen`), never inside an attempt. When this page's spend (usage since `process_change` started) is at or above it, the `cost_stop` node ends the page as a fallback with `rootCauseTag: cost_ceiling_page`, reason `page spent $X of the $Y page ceiling after N attempt(s); last check: <tag>`, keeping the last draft and judge feedback. An attempt that passes is published even if it crossed the ceiling.
+- `MAX_RUN_USD` (default `6.00`): checked in `run_pipeline.py` before each change unit (the context stage counts). Once reached, every remaining unit becomes a fallback with `rootCauseTag: cost_ceiling_run` and no model call; the end of the log says `N pages not attempted: run ceiling $Y reached`. The exit code is unchanged. The summary line also prints the run total and per-page spend; each decision has `metrics.costUsd` and `costUsd` in `pipeline-results.json`.
+- A ceiling fallback opens no ticket (tickets exist only for QA drafts) but is a normal `fallback` decision, so it shows in the Job summary and in the PR body when other pages produce a PR.
+- The Job gets both keys from the ConfigMap `multisync-config` (`MAX_PAGE_USD`, `MAX_RUN_USD`). Ceilings apply per Job run; to retry only the skipped or stopped pages start a Job with `ONLY_PAGES=<page paths, comma separated>` (add `FORCE_PAGES=1` to regenerate them as new without reloading context), optionally with a higher ceiling.
+
 ## 5. Publish and review PR (end of the entrypoint)
 1. `published` pages (trust auto) are pushed straight to the target branch.
 2. `pending_review` pages: branch `docs-sync/<repo-slug>-<sha7>`, one commit, force-pushed.
@@ -126,6 +133,8 @@ A human approves and merges the promotion PR into `main`. The workflow closes ev
 | Page `refreshed`, no PR | similarity 0.92 or more: docs already match | decision metrics `minChunkSimilarity` |
 | `cross_repo_incomplete` | a registered feature is missing in one repo | decision reason lists the repo |
 | `iteration_cap_exceeded` | judge never passed in 6 attempts | decision `attempts`, Phoenix trace |
+| `cost_ceiling_page` | the page spent `MAX_PAGE_USD` before the judge passed | decision reason and `costUsd`; re-run with `ONLY_PAGES=<page>` and a higher `MAX_PAGE_USD` in `multisync-config`, or fix the underlying judge failure |
+| `cost_ceiling_run` | earlier pages spent `MAX_RUN_USD`; this page was not attempted (no model call) | log line `N pages not attempted`; re-run with `ONLY_PAGES=<page,page>` (`FORCE_PAGES=1` if they are new) |
 | Job killed after 2 h | many pages, slow models | raise `JOB_DEADLINE_SECONDS` |
 | PR authored by the owner | bot secrets missing or token failed | Job log line `WARNING: no bot token` |
 | Old PRs stay open | supersede only closes subsets | PR file lists |

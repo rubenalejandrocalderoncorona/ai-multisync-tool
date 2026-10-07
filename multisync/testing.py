@@ -208,7 +208,7 @@ class FakeOpenAI:
                                    "public operations of the service.\n\n## Run\n\nRun the binary and set the port. Use Silence with an alert id to mute an alert.\n")
                     else:
                         content = user
-                    out = {"choices": [{"message": {"content": content}}]}
+                    out = {"choices": [{"message": {"content": content}}], "usage": {"prompt_tokens": 1000, "completion_tokens": 0}}
                 data = json.dumps(out).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
