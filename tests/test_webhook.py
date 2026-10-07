@@ -146,3 +146,63 @@ def test_deploy_manifest_runs_under_the_deployer_service_account_without_secrets
     assert spec["serviceAccountName"] == "multisync-docs-deployer"
     assert "envFrom" not in spec["containers"][0], "the deploy Job gets no secrets"
     assert spec["containers"][0]["command"] == ["python", "-m", "multisync.cli.deploy_site"]
+
+
+# ── review feedback loop: pull_request_review -> revise Job ───────────────────
+REVIEW = {"action": "submitted", "repository": {"full_name": "me/docs"},
+          "review": {"id": 555, "state": "changes_requested", "user": {"login": "ruben", "type": "User"}, "author_association": "OWNER", "body": "x; rm -rf /"},
+          "pull_request": {"number": 9, "state": "open", "html_url": "https://github.com/me/docs/pull/9", "user": {"login": "docs-bot[bot]"},
+                           "head": {"ref": "docs-sync/o-proj-abc1234", "sha": "deadbeef1234"}, "base": {"ref": "qa"}}}
+
+
+def with_(path, v):
+    out = json.loads(json.dumps(REVIEW))
+    node = out
+    for k in path[:-1]:
+        node = node[k]
+    node[path[-1]] = v
+    return out
+
+
+def test_review_changes_requested_on_a_bot_pr_starts_a_revise_job():
+    j, why = plan(cfg(), "pull_request_review", REVIEW)
+    assert j and j["mode"] == "revise" and j["review_id"] == 555 and j["head_ref"] == "docs-sync/o-proj-abc1234" and j["pr"]["by"] == "ruben", why
+    m = job_manifest(cfg(), j, now=1)
+    env = {e["name"]: e["value"] for e in m["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert m["metadata"]["name"] == "multisync-revise-9-555", "named by PR and review id, so a redelivery cannot start a second Job"
+    assert env["JOB_MODE"] == "revise" and env["PR_NUMBER"] == "9" and env["REVIEW_ID"] == "555" and env["REVIEWED_BY"] == "ruben"
+    assert env["HEAD_REF"] == "docs-sync/o-proj-abc1234" and env["CENTRAL_REPO"] == "me/docs" and env["TARGET_BRANCH"] == "qa"
+    assert env["PR_URL"] == "https://github.com/me/docs/pull/9"
+    assert "rm -rf" not in json.dumps(m), "the review text never reaches the Job"
+    assert job_manifest(cfg(), j, now=2)["metadata"]["name"] == m["metadata"]["name"]
+
+
+@pytest.mark.parametrize("label,payload", [
+    ("other repo", with_(["repository", "full_name"], "evil/docs")),
+    ("approved", with_(["review", "state"], "approved")),
+    ("commented", with_(["review", "state"], "commented")),
+    ("edited action", {**REVIEW, "action": "edited"}),
+    ("closed pr", with_(["pull_request", "state"], "closed")),
+    ("not docs-sync", with_(["pull_request", "head"], {"ref": "feature/x", "sha": "deadbeef1234"})),
+    ("other base", with_(["pull_request", "base"], {"ref": "main"})),
+    ("human-authored pr", with_(["pull_request", "user"], {"login": "ruben"})),
+    ("bot reviewer", with_(["review", "user"], {"login": "docs-bot[bot]", "type": "Bot"})),
+    ("outsider", with_(["review", "author_association"], "NONE")),
+    ("bad review id", with_(["review", "id"], "1; id")),
+    ("bad sha", with_(["pull_request", "head"], {"ref": "docs-sync/x-abc1234", "sha": "zz"})),
+])
+def test_review_events_that_do_not_qualify_are_ignored(label, payload):
+    assert plan(cfg(), "pull_request_review", payload)[0] is None, label
+
+
+def test_a_duplicate_job_creation_is_not_an_error(monkeypatch):
+    import urllib.error
+    from multisync import webhook
+
+    def boom(*a, **k):
+        raise urllib.error.HTTPError("u", 409, "conflict", {}, None)
+
+    monkeypatch.setattr(webhook.urllib.request, "urlopen", boom)
+    c = cfg()
+    c.api_base = "https://k"
+    assert webhook.create_job(c, {"metadata": {"name": "multisync-revise-9-555"}}) == "multisync-revise-9-555"

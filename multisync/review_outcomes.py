@@ -87,6 +87,32 @@ class GitHub:
         self._c.post(f"/repos/{self.repo}/issues/{number}/comments", json={"body": f"Superseded by #{by_number}: a newer sync of the same repository regenerated every page this pull request contained."}).raise_for_status()
         self._c.patch(f"/repos/{self.repo}/pulls/{number}", json={"state": "closed"}).raise_for_status()
 
+    def _paged(self, path: str) -> list[dict]:
+        out, page = [], 1
+        while True:
+            r = self._c.get(path, params={"per_page": 100, "page": page})
+            r.raise_for_status()
+            chunk = r.json()
+            out += chunk
+            if len(chunk) < 100:
+                return out
+            page += 1
+
+    # Review feedback loop (multisync.cli.revise_pr): reads, plus the one write it needs, a PR comment. Pushing is done outside this class.
+    def review(self, number: int, review_id: int) -> dict:
+        r = self._c.get(f"/repos/{self.repo}/pulls/{number}/reviews/{review_id}")
+        r.raise_for_status()
+        return r.json()
+
+    def review_comments(self, number: int, review_id: int) -> list[dict]:
+        return self._paged(f"/repos/{self.repo}/pulls/{number}/reviews/{review_id}/comments")
+
+    def issue_comments(self, number: int) -> list[dict]:
+        return self._paged(f"/repos/{self.repo}/issues/{number}/comments")
+
+    def comment(self, number: int, body: str) -> None:
+        self._c.post(f"/repos/{self.repo}/issues/{number}/comments", json={"body": body}).raise_for_status()
+
     def close(self) -> None:
         self._c.close()
 
