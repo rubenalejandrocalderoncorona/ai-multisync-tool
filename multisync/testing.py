@@ -57,12 +57,14 @@ def _tier_of(tier=None, fast=False) -> str:
 class FakeLLM:
     """Scripted LLM. `judges` is a queue of judge results; the last one repeats. Records every call so tests can assert on cost."""
 
-    def __init__(self, judges=None, draft=GOOD_DRAFT, repo_facts=None):
+    def __init__(self, judges=None, draft=GOOD_DRAFT, repo_facts=None, patches=None):
         self.judges = judges or []
+        self.patches = patches or []  # queue for section-patch replies: a dict/list is returned, a str is a malformed reply (ValueError); empty = always malformed
+        self._p = 0
         self.repo_facts = repo_facts or []
         self.draft = draft
         self._j = 0
-        self.calls = {"chat": 0, "judge": 0, "embed": 0, "analyze": 0, "plan": 0, "drafts": [], "analyzeInputs": [], "planInputs": [], "log": [], "garFacts": 0}
+        self.calls = {"chat": 0, "judge": 0, "embed": 0, "analyze": 0, "plan": 0, "drafts": [], "analyzeInputs": [], "planInputs": [], "log": [], "garFacts": 0, "patch": 0, "patchInputs": []}
 
     def embed(self, texts):
         self.calls["embed"] += 1
@@ -97,7 +99,9 @@ class FakeLLM:
     def chat_json(self, messages, tier=None, fast=False, temperature=...):
         c = self.calls
         sys = (messages[0]["content"] if messages else "") or ""
-        if "HYPOTHETICAL documentation" in sys:
+        if "SECTION PATCH MODE" in sys:
+            kind = "patch"
+        elif "HYPOTHETICAL documentation" in sys:
             kind = "gar-facts"
         elif "code analyst" in sys:
             kind = "analyze"
@@ -108,6 +112,16 @@ class FakeLLM:
         else:
             kind = "judge"
         c["log"].append({"kind": kind, "tier": _tier_of(tier, fast)})
+        if kind == "patch":
+            c["patch"] += 1
+            c["patchInputs"].append(messages[1]["content"])
+            r = self.patches[min(self._p, len(self.patches) - 1)] if self.patches else "not json"
+            self._p += 1
+            if callable(r):
+                r = r(messages)
+            if isinstance(r, str):
+                raise ValueError(f"Model did not return JSON: {r[:50]}")
+            return r
         if kind == "repo-facts":
             return {"facts": self.repo_facts}
         if kind == "gar-facts":
@@ -127,8 +141,8 @@ class FakeLLM:
         return r
 
 
-def fake_llm(judges=None, draft=GOOD_DRAFT, repo_facts=None) -> FakeLLM:
-    return FakeLLM(judges, draft, repo_facts)
+def fake_llm(judges=None, draft=GOOD_DRAFT, repo_facts=None, patches=None) -> FakeLLM:
+    return FakeLLM(judges, draft, repo_facts, patches)
 
 
 def make_deps(env=None, llm=None, vectors=None, code_vectors=None, facts=None, registry=None, policy=None) -> dict:

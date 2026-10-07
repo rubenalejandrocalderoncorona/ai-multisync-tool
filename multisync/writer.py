@@ -7,6 +7,7 @@ import os
 import re
 from datetime import datetime, timezone
 
+from . import patching
 from . import prompts as P
 
 
@@ -99,6 +100,37 @@ def draft_document(llm, *, mode="docs", file_path, source, existing="", changed_
     out = llm.chat([{"role": "system", "content": system}, {"role": "user", "content": user}], tier=tier)
     text = out if len(out) > 50 else ((existing or out) if mode == "code" else source)
     return {"text": text, "promptId": prompt["id"]}
+
+
+def patch_document(llm, *, sections, file_path=None, changed_files=None, changed_symbols=None, diff_text="", related_code="", fact_sheet="", plan="", source="",
+                   context=None, policy=None, style=None, instructions="", feedback=None, tier=None) -> dict:
+    """Section-patch drafting: the model returns operations on the existing sections, code assembles the page. Malformed JSON is retried once.
+    Raises patching.PatchError when the reply cannot be used (still malformed, unknown section id, bad operation): the caller falls back to
+    draft_document. Returns {text, promptId, operations, changed: {replaced, deleted, inserted}, unchangedReason}."""
+    changed_files = changed_files or []
+    prompt = P.load_prompt("patch-code")
+    system = "\n\n".join(p for p in [
+        P.fill(prompt["text"], {"PERSONA": (style or {}).get("prompt") or "You are a senior technical writer."}),
+        instructions and f"Documentation standards:\n{instructions}",
+        P.style_text({"key": None, "rubric": []}, policy or {}),
+    ] if p)
+    ctx = "\n---\n".join(f"[{c['heading']}] {c['text'][:600]}" for c in (context or []))
+    fix = "\n\nA reviewer rejected the previous attempt. Fix exactly these problems:\n- " + "\n- ".join(feedback) if feedback else ""
+    blocks = "\n".join(f"=== SECTION {s['id']} ===\n{s['text'].rstrip(chr(10))}\n" for s in sections)
+    user = (f"WHAT_CHANGED:\nChanged files: {', '.join(changed_files) or '(unknown)'}\nChanged public symbols: {', '.join(changed_symbols or []) or '(none detected)'}\n"
+            f"Source diff (before -> after):\n{diff_text or '(not available)'}\n\nSECTIONS:\n{blocks}\nCONTEXT:\n{ctx or '(none)'}\n\n"
+            f"FACT_SHEET:\n{fact_sheet or '(none)'}\n\nPLAN:\n{plan or '(none)'}\n\nCODE:\n{source}\n\nRELATED_CODE:\n{related_code or '(none)'}{fix}")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    try:
+        r = llm.chat_json(messages, tier=tier)
+    except ValueError:
+        r = llm.chat_json([*messages, {"role": "user", "content": "Your previous reply was not valid JSON. Reply again with ONLY the JSON object."}], tier=tier)
+    ops = r if isinstance(r, list) else (r.get("operations") if isinstance(r, dict) else None)
+    if not isinstance(ops, list):
+        raise patching.PatchError("reply has no operations list")
+    text = patching.apply_operations(sections, ops)
+    return {"text": text, "promptId": prompt["id"], "operations": ops, "changed": patching.changed_ids(sections, ops),
+            "unchangedReason": (r.get("unchanged_reason") if isinstance(r, dict) else None) or None}
 
 
 def polish_only(llm, *, draft, policy, style, instructions, tier=None) -> str:
