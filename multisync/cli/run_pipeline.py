@@ -32,7 +32,7 @@ from ..codesource import build_code_changes, pages_scope
 from ..config import repo_policy
 from ..context import sync_context, sync_site
 from ..fallback import escalate
-from ..pipeline import process_change
+from ..pipeline import find_site_page, process_change
 from ..prompts import load_styles
 from ..repofacts import profile_repo
 from ..sitedocs import read_site_file, site_commit, site_files
@@ -144,10 +144,16 @@ def main() -> None:
     if mode_setting != "code":
         for file in files:
             full = os.path.join(source_dir, file)
-            changes.append({
+            unit = {
                 "repo": repo, "filePath": file, "commit": commit, "kind": "docs", "before": G.read_at(source_dir, before, file),
                 "after": open(full, encoding="utf-8").read() if os.path.exists(full) else None,
-            })
+            }
+            # An edited source doc whose site page already exists is patched, not converted again (new and deleted docs are not).
+            page = find_site_page(target_base, file) if unit["after"] is not None and unit["before"] else None
+            if page:
+                unit.update(existing=re.sub(r"^---\n[\s\S]*?\n---\n+", "", open(page, encoding="utf-8").read(), count=1), existingPath=page,
+                            **({"noPatch": True} if env.get("FULL_SYNC") == "1" or env.get("FORCE_PAGES") == "1" else {}))
+            changes.append(unit)
     if mode_setting in ("code", "both"):
         prev = before if G.rev_exists(source_dir, before) else ""  # first commit / new branch => document everything in scope
         acc = G.accessors(source_dir)

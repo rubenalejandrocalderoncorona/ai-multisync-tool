@@ -136,7 +136,8 @@ def page_change(*, repo, commit, page, target, policy, acc, root, feedback) -> d
         text = next((t for t in (acc.read_at(commit, c) for c in (page, f"docs/{rel}", f"documentation/{rel}")) if t is not None), None)
         unit = {"repo": repo, "filePath": page, "commit": commit, "kind": "docs", "before": None, "after": text, "existing": existing} if text is not None else None
     if unit:
-        unit.update({"commit": commit, "existing": existing, "reviewFeedback": feedback})
+        # revisionPatch: patch the page at the branch tip with the reviewer's comments as the change (falls back to a full redraft if that fails)
+        unit.update({"commit": commit, "existing": existing, "reviewFeedback": feedback, "revisionPatch": True})
     return unit
 
 
@@ -183,6 +184,10 @@ def run_revision(gh, *, number: int, review_id: int, base_branch: str, deps: dic
         decision = process_change(change, {**deps, "revision": True, "forceTier": tier if tier in ("cheap", "expensive") else None, "logger": logger,
                                            "escalate": None, "runId": f"revise-{review_id}"})
         entry["attempts"] = len(decision.get("attempts") or [])
+        m = decision.get("metrics") or {}
+        entry["draftMode"] = m.get("draftMode")
+        if m.get("patchFallback"):
+            entry["patchFallback"] = True
         if decision.get("action") != "write" or decision.get("outcome") not in ("pending_review", "published"):
             fails = [a.get("failure") for a in decision.get("attempts") or [] if a.get("failure")]
             entry.update(status="failed", reason=decision.get("reason"), tag=decision.get("rootCauseTag"), failed_checks=sorted(set(fails)),
@@ -208,7 +213,10 @@ def render_comment(result: dict, head_sha: str = "") -> str:
         for e in result["pages"]:
             s = e.get("scores") or {}
             lines.append(f"| `{e['page']}` | {e['status']} | {s.get('precision', '')} | {s.get('recall', '')} | {s.get('style', '')} | {s.get('quality', '')} | {e.get('tier') or ''} |")
-        lines += ["", "Each revised page was redrafted from the page as it stood on this branch, with your comments as feedback, and passed the same judge and deterministic checks as the first draft."]
+        modes = [f"- `{e['page']}`: {e['draftMode']}" for e in result["pages"] if e.get("draftMode") and e["status"] == "revised"]
+        lines += ["", "Each revised page was revised from the page as it stood on this branch, with your comments as the change, and passed the same judge and deterministic checks as the first draft."]
+        if modes:
+            lines += ["", "Draft mode:", *modes]
     else:
         lines += [marker("revise-failed", rid), f"No safe revision could be produced for review {rid}, so nothing was pushed.", ""]
         for e in result["pages"]:

@@ -4,6 +4,7 @@
   apply_operations(sections, ops) -> str                            untouched sections stay byte-identical
   retained_pct(old, new)          -> float                          share of the old non-blank lines still present unchanged
   source_diff(before, after, files) -> str                          what changed in the source, for the patch prompt
+  doc_diff(before, after, path)   -> str                            the same for one source markdown document (docs mode)
 
 An operation is {"op": "replace", "section": id, "text": ...}, {"op": "insert_after", "section": id, "text": ...} or
 {"op": "delete", "section": id}. Anything malformed or pointing at an unknown section raises PatchError: the caller falls back
@@ -163,3 +164,14 @@ def source_diff(before: str | None, after: str | None, changed_files: list[str] 
     if len(text) <= max_chars:
         return text
     return "\n".join(short)[:max_chars] + "\n[diff truncated]"
+
+
+def doc_diff(before: str | None, after: str | None, path: str = "document.md", max_chars: int = 12000) -> str:
+    """Unified diff of one source document (docs mode): the source text is what changed, the page is converted from it."""
+    old, new = (before or "").splitlines(), (after or "").splitlines()
+    text = ""
+    for ctx in (3, 1):
+        text = "\n".join(difflib.unified_diff(old, new, f"a/{path}", f"b/{path}", n=ctx, lineterm=""))
+        if len(text) <= max_chars:
+            return text
+    return text[:max_chars] + "\n[diff truncated]"

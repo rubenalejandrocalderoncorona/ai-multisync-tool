@@ -85,6 +85,7 @@ class State(TypedDict, total=False):
     decision: Any
     patch: Any
     patchFallback: bool
+    patchError: str
     linkedPoints: Any
 
 
@@ -102,6 +103,22 @@ def target_path_for(file_path: str, policy, docs_root: str, subfolder: str | Non
     rel = re.sub(r"^(docs/|documentation/)", "", re.sub(r"\.txt$", ".md", file_path))
     base = policy.get("targetPath") or posixpath.join(docs_root, "services", policy["serviceName"])
     return posixpath.normpath(posixpath.join(base, subfolder, rel) if subfolder else posixpath.join(base, rel))
+
+
+def find_site_page(target_base: str, file_path: str) -> str | None:
+    """The page a docs-mode source file was converted into: <target_base>/[folder/]<name>.md. The folder was chosen when the page was first published,
+    so it is searched for; None when there is no page or the name is ambiguous."""
+    rel = re.sub(r"^(docs/|documentation/)", "", re.sub(r"\.txt$", ".md", file_path))
+    hits = []
+    for root, _dirs, files in os.walk(target_base):
+        for f in files:
+            full = os.path.join(root, f)
+            r = os.path.relpath(full, target_base).replace(os.sep, "/")
+            if r == rel or r.endswith("/" + rel):
+                hits.append((r, full))
+    exact = [h for h in hits if h[0] == rel]
+    pick = exact or hits
+    return pick[0][1] if len(pick) == 1 else None
 
 
 def _dedupe(chunks: list[dict]) -> list[dict]:
@@ -361,12 +378,32 @@ def process_change(change: dict, deps) -> dict:
         }
 
     def patch_base():
-        """The existing page as the model owns it: no front matter, no Change History (code adds those). Empty when patching does not apply."""
-        # Patch mode: incremental code run (a previous snapshot exists, so not a first draft and not a forced full sync) over an existing page.
-        if mode != "code" or not t["patchDrafting"] or not change.get("before") or not (change.get("existing") or "").strip():
-            return None
+        """(base, reason). base: the existing page as the model owns it (no front matter, no Change History: code adds those) when patch drafting
+        applies, else None and the reason why the page is drafted in full."""
+        revision = bool(change.get("revisionPatch"))
+        if not t["patchDrafting"]:
+            return None, "patch drafting is off (PATCH_DRAFTING=0)"
+        if revision and not t["patchRevisions"]:
+            return None, "revision patching is off (PATCH_REVISIONS=0)"
+        if not (change.get("existing") or "").strip():
+            return None, "first draft: no existing page"
+        if revision:
+            pass  # a revision patches the page at the PR branch tip; the reviewer's comments are the change
+        elif mode == "docs":
+            if not t["patchDocsMode"]:
+                return None, "docs-mode patching is off (PATCH_DOCS_MODE=0)"
+            if change.get("noPatch"):
+                return None, "full sync requested"
+            if not (change.get("before") or "").strip():
+                return None, "new source document"
+        elif not change.get("before"):
+            return None, "first draft: no previous snapshot"
         base = patching.strip_generated(change["existing"])
-        return base if len(patching.split_sections(base)) >= 2 else None
+        return (base, "") if len(patching.split_sections(base)) >= 2 else (None, "the page has fewer than 2 sections")
+
+    def patch_reviewer_request():
+        items = [str(x) for x in (change.get("reviewFeedback") or [])]
+        return "\n".join(f"- {x}" for x in items) or "(no comments)"
 
     def n_write_draft(s):
         top_k = t["topKWidened"] if s["widened"] else t["topK"]
@@ -380,30 +417,39 @@ def process_change(change: dict, deps) -> dict:
                                               "multisync.attempt": s["iter"] + 1, "multisync.tier": s["tier"],
                                               **tracing.document_attrs([{"id": c["id"], "content": c["text"], "score": c["score"]} for c in context])}) as dsp:
             dsp.io(input=f"## Fact sheet\n{common['fact_sheet']}\n\n## Doc plan\n{common['plan']}")
-            base = None if s.get("patchFallback") else patch_base()
-            metrics: dict = {"patchMode": False} if mode == "code" else {}
+            base, reason = (None, f"patch failed: {s.get('patchError')}") if s.get("patchFallback") else patch_base()
+            revision = bool(change.get("revisionPatch"))
+            metrics: dict = {"patchMode": False, "draftMode": f"full draft ({reason})"}
             patch_state = None
             out = None
             if base is not None:
                 sections = patching.split_sections(base)
                 try:
                     names = ((s.get("routeInfo") or {}).get("signals") or {}).get("publicChanged") or []
-                    p_out = W.patch_document(llm, sections=sections, changed_symbols=names, diff_text=patching.source_diff(change.get("before"), change["after"], changed_files), **common)
+                    if revision:  # the reviewer's comments take the place of the source diff; the judge's findings still go back to the patch call
+                        extra = dict(reviewer_request=patch_reviewer_request(), feedback=s["feedback"])
+                    elif mode == "docs":
+                        extra = dict(diff_text=patching.doc_diff(change.get("before"), change["after"], change["filePath"]))
+                    else:
+                        extra = dict(diff_text=patching.source_diff(change.get("before"), change["after"], changed_files))
+                    p_out = W.patch_document(llm, sections=sections, changed_symbols=names, mode=mode, **{**common, **extra})
                     ch = p_out["changed"]
                     n_changed = len(set(ch["replaced"]) | set(ch["deleted"]))
                     out = {"text": p_out["text"], "promptId": p_out["promptId"]}
-                    patch_state = {"base": base, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "diffLines": diff_line_count(change.get("before"), change["after"])["total"]}
-                    metrics = {"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed}
+                    patch_state = {"base": base, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "diffLines": 0 if revision else diff_line_count(change.get("before"), change["after"])["total"],
+                                   "revision": revision}
+                    metrics = {"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed,
+                               "draftMode": f"patch ({n_changed} of {len(sections)} sections changed)"}
                     note.update({"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "inserted": len(ch["inserted"]),
                                  **({"unchangedReason": p_out["unchangedReason"]} if p_out["unchangedReason"] else {})})
                 except (patching.PatchError, ValueError) as err:
                     note.update({"patchFallback": True, "patchError": str(err)[:200]})
-                    metrics = {"patchMode": False, "patchFallback": True, "sectionsTotal": None, "sectionsChanged": None, "retainedPct": None}
+                    metrics = {"patchMode": False, "patchFallback": True, "draftMode": f"full draft (patch failed: {str(err)[:80]})", "sectionsTotal": None, "sectionsChanged": None, "retainedPct": None}
             if out is None:
                 out = W.draft_document(llm, mode=mode, existing=change.get("existing") or "", template_path=s.get("templatePath"), **common)
             dsp.io(output=out["text"])
         update = {"iter": s["iter"] + 1, "polished": False, "draft": out["text"], "escalatePending": False, "verifyFailed": False, "patch": patch_state,
-                  **({"patchFallback": True} if note.get("patchFallback") else {}), **({"metrics": metrics} if metrics else {})}
+                  **({"patchFallback": True, "patchError": note["patchError"]} if note.get("patchFallback") else {}), **({"metrics": metrics} if metrics else {})}
         return {"note": {**note, "prompt": out["promptId"]}, "update": update}
 
     def n_verify_draft(s):
@@ -420,9 +466,11 @@ def process_change(change: dict, deps) -> dict:
             names = core or [x["name"] for x in allsyms if x["kind"] == "export"]
         public_changed = names if mode == "code" else []
         plan = s.get("plan") or {}
-        patch = ({**s["patch"], "maxShare": t["patchMaxChangedSectionShare"], "smallLines": t["patchSmallChangeLines"], "minSections": t["patchGuardMinSections"]}
+        patch = ({**s["patch"], "maxShare": t["revisePatchMaxSectionShare"] if s["patch"].get("revision") else t["patchMaxChangedSectionShare"], "smallLines": t["patchSmallChangeLines"], "minSections": t["patchGuardMinSections"]}
                  if s.get("patch") else None)
-        v = verify_draft(s["draft"], public_changed, change.get("existing") or "", change["filePath"], change.get("title") or None,
+        # docs mode compares with the existing page only when it is patched or revised (an edited doc may legitimately shrink the page)
+        existing_page = (change.get("existing") or "") if (mode == "code" or s.get("patch") or deps.get("revision")) else ""
+        v = verify_draft(s["draft"], public_changed, existing_page, change["filePath"], change.get("title") or None,
                          plan.get("purpose") or change.get("brief") or "Generated documentation.", patch=patch)
         note = {"tier": s["tier"], "ok": v["ok"], **v["metrics"], **({} if v["ok"] else {"reasons": v["reasons"][:4]})}
         retained = {"retainedPct": v["metrics"]["retainedPct"]} if "retainedPct" in v["metrics"] else {}
@@ -477,7 +525,9 @@ def process_change(change: dict, deps) -> dict:
     def n_publish(s):
         draft, verdict = s["accepted"]["draft"], s["accepted"]["verdict"]
         # A code-mode page has a declared path (pages[].path), so it is never re-filed; docs-mode files are classified.
-        subfolder = None if mode == "code" else W.classify_folder(llm, file_path=change["filePath"], content=draft, folder_spec=W.extract_folder_spec(deps.get("instructions")))
+        # A patched docs page stays where it is: the folder is not classified again for a page that already has one.
+        keep_path = change.get("existingPath") if (mode == "docs" and s.get("patch") and change.get("existingPath")) else None
+        subfolder = None if (mode == "code" or keep_path) else W.classify_folder(llm, file_path=change["filePath"], content=draft, folder_spec=W.extract_folder_spec(deps.get("instructions")))
         host = deps.get("githubHost") or "github.com"
         source_url = (f"https://{host}/{change['repo']}/tree/{change['commit']}" if mode == "code" else f"https://{host}/{change['repo']}/blob/{change['commit']}/{change['filePath']}")
         if change.get("title"):
@@ -501,7 +551,7 @@ def process_change(change: dict, deps) -> dict:
                 "update": {"decision": finish(s, {
                     "outcome": "published" if auto else "pending_review", "reviewerAction": "auto_published" if auto else "needs_review",
                     "reason": f"passed all checks in {len(s['attempts'])} attempt(s)", "action": "write", "content": content, "subfolder": subfolder,
-                    "targetPath": target_path_for(change["filePath"], policy, cfg["paths"]["docsRoot"], subfolder),
+                    "targetPath": keep_path or target_path_for(change["filePath"], policy, cfg["paths"]["docsRoot"], subfolder),
                     "metrics": {**s["metrics"], "final": final, "policyVersion": policy_version(cfg), "modelTier": s["tier"], "escalated": bool(s["escalated"])}})}}
 
     def n_fallback(s):

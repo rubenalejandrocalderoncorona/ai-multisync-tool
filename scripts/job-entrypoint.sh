@@ -185,7 +185,7 @@ git checkout -q -B "$BR"
 git add -A -- "${REV[@]}"
 git commit -q -m "docs: proposed sync from ${SOURCE_REPO}" -m "Source commit: $SHA"
 git push -q -f origin "$BR"
-jq -r '"Source: `\(.repo)` @ `\(.commit[0:7])`\n\n| File | Precision | Recall | Style | Quality |\n|---|---|---|---|---|" , (.results[] | select(.outcome=="pending_review") | "| `\(.path)` | \(.metrics.final.precision) | \(.metrics.final.recall) | \(.metrics.final.style) | \(.metrics.final.quality) |")' pipeline-results.json > pr-body.md
+jq -r '"Source: `\(.repo)` @ `\(.commit[0:7])`\n\n| File | Precision | Recall | Style | Quality | Draft mode |\n|---|---|---|---|---|---|" , (.results[] | select(.outcome=="pending_review") | "| `\(.path)` | \(.metrics.final.precision) | \(.metrics.final.recall) | \(.metrics.final.style) | \(.metrics.final.quality) | \(.metrics.draftMode // "-") |")' pipeline-results.json > pr-body.md
 printf '\nMerging indexes this text into the vector store. Closing without merging leaves the index untouched.\n' >> pr-body.md
 if gh pr view "$BR" --repo "$CENTRAL_REPO" >/dev/null 2>&1; then
   gh pr edit "$BR" --repo "$CENTRAL_REPO" --body-file pr-body.md
