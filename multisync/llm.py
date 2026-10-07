@@ -102,16 +102,26 @@ class LLM:
         opts = opts or {}
         return "cheap" if opts.get("tier") == "cheap" or opts.get("fast") else "expensive"
 
-    def chat(self, messages: list[dict], *, tier: str | None = None, fast: bool = False, temperature: Any = ...) -> str:
-        """Assistant message content."""
+    def chat(self, messages: list[dict], *, tier: str | None = None, fast: bool = False, temperature: Any = ..., json_mode: bool = False) -> str:
+        """Assistant message content. `json_mode` asks the API for a syntactically valid JSON object (response_format json_object): the model can no
+        longer break the JSON with an unescaped quote inside a claim. An endpoint that rejects the parameter is remembered and called without it."""
         t = self.tier_of({"tier": tier, "fast": fast})
         ep = self.tiers[t]
         body = {"model": ep["model"], "messages": messages}
+        if json_mode and not ep.get("noJsonMode"):
+            body["response_format"] = {"type": "json_object"}
         temp = ep.get("temperature") if temperature is ... else temperature
         if temp is not None:  # some models reject any explicit value
             body["temperature"] = temp
         with tracing.span(f"llm:{t} {ep['model']}", "LLM", **tracing.llm_attrs(messages, ep["model"], t, temp)) as sp:
-            data = self._post(ep["chatPath"], body, ep)
+            try:
+                data = self._post(ep["chatPath"], body, ep)
+            except RuntimeError as err:
+                if "response_format" not in body or "response_format" not in str(err):
+                    raise
+                ep["noJsonMode"] = True  # this endpoint/model does not accept json mode: do not ask again
+                body.pop("response_format")
+                data = self._post(ep["chatPath"], body, ep)
             u = data.get("usage") or {}
             pin, pout = u.get("prompt_tokens") or 0, u.get("completion_tokens") or 0
             usd = (pin * (ep.get("priceIn") or 0) + pout * (ep.get("priceOut") or 0)) / 1e6
@@ -127,7 +137,7 @@ class LLM:
             return text
 
     def chat_json(self, messages: list[dict], **opts) -> Any:
-        return parse_json(self.chat(messages, **opts))
+        return parse_json(self.chat(messages, json_mode=True, **opts))
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """One vector per input, in order. Always the primary (OpenAI) endpoint."""
@@ -145,16 +155,51 @@ class LLM:
         self._client.close()
 
 
+def repair_json(text: str) -> str:
+    """Fix the two ways a model usually breaks JSON: a double quote INSIDE a string value (a claim that quotes a name) and a trailing comma.
+    A quote closes a string only when the next non-space character is , : } or ]; any other quote inside a string is escaped."""
+    out, in_str, i, n = [], False, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if ch == "\\" and i + 1 < n:
+                out.append(ch + text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j >= n or text[j] in ",:}]":
+                    in_str = False
+                    out.append(ch)
+                else:
+                    out.append('\\"')
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_str = True
+            out.append(ch)
+        i += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
 def parse_json(raw: str) -> Any:
     clean = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
     clean = re.sub(r"\s*```$", "", clean).strip()
-    try:
-        return json.loads(clean)
-    except ValueError:
-        m = re.search(r"\{[\s\S]*\}", clean)
-        if m:
-            return json.loads(m.group(0))
+    m = re.search(r"\{[\s\S]*\}", clean)
+    candidates = [clean] + ([m.group(0)] if m and m.group(0) != clean else [])
+    first_err = None
+    for c in candidates:
+        for text in (c, repair_json(c)):
+            try:
+                return json.loads(text)
+            except ValueError as e:
+                first_err = first_err or e
+    if m is None:
         raise ValueError(f"Model did not return JSON: {raw[:200]}") from None
+    raise ValueError(f"Model returned invalid JSON ({first_err}): {raw[:200]}") from None
 
 
 def cosine(a: list[float], b: list[float]) -> float:
