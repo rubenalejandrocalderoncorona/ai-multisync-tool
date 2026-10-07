@@ -166,3 +166,17 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- The audit queue is the set of sampled rows without a verdict.
 CREATE INDEX IF NOT EXISTS review_outcomes_audit_idx ON review_outcomes (diff_classification, model_tier_used) WHERE audit_sampled;
+
+-- Once-only markers for the segment alerts (graduation: a segment is statistically validated; drift: audited accuracy fell). ALERTING ONLY: the row
+-- says "a human was told"; nothing reads it to approve, suspend or route anything. The insert comes first and the alert is sent only by the writer
+-- whose insert happened, so a redelivered webhook or two concurrent Jobs notify once. New table; no existing table is changed.
+CREATE TABLE IF NOT EXISTS segment_alerts (
+  id                  BIGSERIAL PRIMARY KEY,
+  kind                TEXT        NOT NULL CHECK (kind IN ('graduation','drift')),
+  diff_classification TEXT        NOT NULL,
+  model_tier_used     TEXT        NOT NULL,
+  policy_version      TEXT        NOT NULL,
+  payload             JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (kind, diff_classification, model_tier_used, policy_version)
+);

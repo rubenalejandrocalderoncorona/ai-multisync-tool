@@ -13,6 +13,13 @@ from .contracts import routes_match
 INIT_SQL = Path(__file__).resolve().parent.parent / "infra" / "postgres" / "init.sql"
 
 
+def _trail(rows) -> dict:
+    """First and last review time, the distinct reviewers and the PR links of the given review_outcomes rows (already ordered by time)."""
+    ts = [str(r["reviewed_at"]) for r in rows if r.get("reviewed_at")]
+    return {"first_reviewed_at": ts[0] if ts else None, "last_reviewed_at": ts[-1] if ts else None,
+            "reviewers": sorted({r["reviewed_by"] for r in rows if r.get("reviewed_by")}), "pr_urls": list(dict.fromkeys(r["pr_url"] for r in rows))}
+
+
 class PgFactStore:
     def __init__(self, database_url: str):
         import psycopg  # lazy: unit tests and memory mode do not need a database driver
@@ -183,7 +190,7 @@ class PgFactStore:
         return self._q("SELECT id, repo, change_unit_id FROM review_outcomes WHERE audit_sampled AND audit_verified_accurate IS NULL ORDER BY id LIMIT %s", (limit,))
 
     def audit_item(self, audit_id):
-        rows = self._q("SELECT id, repo, change_unit_id, audit_sampled, audit_verified_accurate FROM review_outcomes WHERE id=%s", (audit_id,))
+        rows = self._q("SELECT id, repo, change_unit_id, audit_sampled, audit_verified_accurate, diff_classification, model_tier_used, policy_version FROM review_outcomes WHERE id=%s", (audit_id,))
         return rows[0] if rows else None
 
     def submit_audit(self, audit_id, reviewer, accurate, notes=None):
@@ -204,6 +211,21 @@ class PgFactStore:
         if policy_version:
             sql, args = sql + " AND policy_version=%s", args + [policy_version]
         return self._q(sql, args)[0]
+
+    # ── segment alerts (markers so each alert fires once; alerting only) ─────────
+    def claim_segment_alert(self, kind, diff_classification, model_tier, policy_version, payload=None) -> bool:
+        """Insert the marker first; True only if this call inserted it (race safe: the loser of a concurrent insert gets False and stays silent)."""
+        from psycopg.types.json import Jsonb
+        rows = self._q("INSERT INTO segment_alerts (kind, diff_classification, model_tier_used, policy_version, payload) VALUES (%s,%s,%s,%s,%s) "
+                       "ON CONFLICT (kind, diff_classification, model_tier_used, policy_version) DO NOTHING RETURNING id",
+                       (kind, diff_classification, model_tier, policy_version, Jsonb(payload or {})))
+        return bool(rows)
+
+    def segment_trail(self, diff_classification, model_tier, policy_version) -> dict:
+        """Who reviewed what, and when, for one segment under one policy version (the audit trail of an alert)."""
+        rows = self._q("SELECT reviewed_by, reviewed_at, pr_url FROM review_outcomes WHERE diff_classification=%s AND model_tier_used=%s AND policy_version=%s ORDER BY reviewed_at, id",
+                       (diff_classification, model_tier, policy_version))
+        return _trail(rows)
 
     # ── facts about a repository as a whole ──────────────────────────────────────
     def replace_repo_facts(self, repo, source, rows, commit) -> None:
@@ -296,7 +318,20 @@ class MemoryFactStore:
     def audit_item(self, audit_id):
         x = next((x for x in getattr(self, "review_outcomes", []) if x.get("id") == audit_id), None)
         return x and {"id": x["id"], "repo": x["repo"], "change_unit_id": x["change_unit_id"], "audit_sampled": x.get("audit_sampled", False),
-                      "audit_verified_accurate": x.get("audit_verified_accurate")}
+                      "audit_verified_accurate": x.get("audit_verified_accurate"), "diff_classification": x["diff_classification"],
+                      "model_tier_used": x["model_tier_used"], "policy_version": x["policy_version"]}
+
+    def claim_segment_alert(self, kind, diff_classification, model_tier, policy_version, payload=None):
+        self.segment_alerts = getattr(self, "segment_alerts", {})
+        key = (kind, diff_classification, model_tier, policy_version)
+        if key in self.segment_alerts:
+            return False
+        self.segment_alerts[key] = dict(payload or {})
+        return True
+
+    def segment_trail(self, diff_classification, model_tier, policy_version):
+        rows = [x for x in getattr(self, "review_outcomes", []) if (x["diff_classification"], x["model_tier_used"], x["policy_version"]) == (diff_classification, model_tier, policy_version)]
+        return _trail(sorted(rows, key=lambda x: str(x.get("reviewed_at") or "")))
 
     def submit_audit(self, audit_id, reviewer, accurate, notes=None):
         x = next((x for x in getattr(self, "review_outcomes", []) if x.get("id") == audit_id), None)
