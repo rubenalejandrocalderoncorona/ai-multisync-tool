@@ -50,6 +50,27 @@ Each attempt of `write_draft` also emits a `draft` span (the fact sheet and doc 
 CronJob scores those spans for hallucination with the cheap-tier model and attaches a `draft_faithfulness` evaluation to each one; `multisync evals
 flag-low-scores` lists the low ones for a human. It runs apart from generation and only reads and annotates in Phoenix. See [DRAFT-EVALS.md](DRAFT-EVALS.md).
 
+### Review outcomes and confidence floors (every 6 hours)
+
+What humans did with the drafts, next to the generation and judge traces, in the same Phoenix project (`multirepo-agent-docs`). Read-only on
+`multisync.review_outcomes`; informational only (nothing auto-approves, `auto_approval_eligible` is never read).
+
+| Span name | One per | What it carries |
+|---|---|---|
+| `review_outcome` | review row | `multisync.change_unit_id`, `multisync.pr_url`, `multisync.segment` (`<diff_classification>:<tier>`), `multisync.policy_version`, `multisync.outcome`, `multisync.reviewer`, `multisync.judge.<precision\|recall\|style\|quality>`, `multisync.synthetic`; `session.id` = the segment, so each segment is one session; span time = `reviewed_at` |
+| `review_segment_metrics` | (segment, policy version, UTC date) | `multisync.n`, `no_edition_rate`, `wilson_lower_bound`/`wilson_upper_bound` (z 1.96), `graduation_progress` (n / min samples, capped at 1.0) and `graduation_n` (raw n), `ready`, `synthetic_n`, `judge_vs_human_correlation.<score>` (point-biserial vs. the unedited outcome, rejected excluded; absent when n < 5 or no variance). The same numbers are an annotation named `review_segment_metrics` (score = Wilson lower bound, label `ready`/`not_ready`), which Phoenix upserts, so the latest run of the day wins |
+
+Filter in the Phoenix span filter box: `name == 'review_outcome'`, `metadata`-style attribute filters such as `attributes['multisync.segment'] == 'public_interface:expensive'`,
+and `attributes['multisync.synthetic'] == False` to hide seeded rows (rows whose `pr_url` starts with `synthetic://` are exported but tagged `true`). Ids are derived
+from (pr_url, change_unit_id) and (segment, policy, date), so re-running is idempotent: Phoenix drops spans it already has.
+
+```bash
+python -m multisync.cli.phoenix_review_evals --dry-run                 # per-segment table, no call to Phoenix
+python -m multisync.cli.phoenix_review_evals --min-samples 30 --threshold 0.85 [--json]
+multisync phoenix-review-evals --dry-run
+```
+Needs `FACTSTORE_DATABASE_URL`, `PHOENIX_COLLECTOR_ENDPOINT`, `PHOENIX_API_KEY` and the `evals` extra. `infra/k8s/review-evals-cronjob.yaml` runs it every 6 hours.
+
 ## 3. Raw logs
 
 `kubectl -n multirepo logs job/<name>` (kept five minutes after the Job ends) and `kubectl -n multirepo logs deploy/multisync-webhook`

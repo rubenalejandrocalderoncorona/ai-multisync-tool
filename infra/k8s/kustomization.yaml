@@ -9,4 +9,5 @@ resources:
   - webhook.yaml
   - phoenix.yaml
   - draft-evals-cronjob.yaml
+  - review-evals-cronjob.yaml
 # NOT listed on purpose: secrets.example.yaml.
