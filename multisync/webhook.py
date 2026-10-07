@@ -9,6 +9,8 @@ Events (all signed with WEBHOOK_SECRET, X-Hub-Signature-256):
   repository_dispatch  a source repo in ALLOWED_REPOS (client_payload fields)     -> Job mode "sync"
   pull_request closed  CENTRAL_REPO, merged, head docs-sync/*, base TARGET_BRANCH -> Job mode "index" (which also logs the review outcome)
   pull_request closed  the same, but closed WITHOUT merging                        -> Job mode "review" (logs the review outcome, nothing else)
+  pull_request_review  CENTRAL_REPO, submitted "changes_requested" by a human on an open bot-authored docs-sync PR into TARGET_BRANCH
+                                                                                  -> Job mode "revise" (redrafts the pages with the review as feedback; one Job per review id)
   workflow_run         CENTRAL_REPO "Documentation site" finished OK on qa/main   -> Job mode "deploy" (rolls the docs site out)
   ping                 -> pong
 Anything unsigned gets 401; a signed event that does not qualify gets 200 "ignored: <why>". Payload fields are validated against strict
@@ -170,6 +172,8 @@ def plan(cfg: Config, event: str, p: dict) -> tuple[dict | None, str]:
         if not SHA_RE.match(merge or "") or not SHA_RE.match(base_sha or ""):
             return None, "invalid shas"
         return {"mode": "index", "source_repo": full_name, "sha": merge, "before": "", "target": base.get("ref"), "files": [], "base_sha": base_sha, "merge_sha": merge, "pr": review}, ""
+    if event == "pull_request_review":
+        return _plan_review(cfg, p, full_name)
     if event == "workflow_run":
         if full_name.lower() != cfg.central.lower():
             return None, "not the central repository"
@@ -190,10 +194,47 @@ def plan(cfg: Config, event: str, p: dict) -> tuple[dict | None, str]:
     return None, "event not handled"
 
 
+REVIEWER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
+def _plan_review(cfg: Config, p: dict, full_name: str) -> tuple[dict | None, str]:
+    """A reviewer asked for changes on a docs-sync PR that the bot opened: start one `revise` Job. Every value is validated; nothing from the
+    review text (body, comments) is read here, the Job fetches it from the GitHub API."""
+    if full_name.lower() != cfg.central.lower():
+        return None, "not the central repository"
+    review, pr = p.get("review") or {}, p.get("pull_request") or {}
+    if p.get("action") != "submitted" or str(review.get("state", "")).lower() != "changes_requested":
+        return None, "not a submitted changes_requested review"
+    head, base = pr.get("head") or {}, pr.get("base") or {}
+    if pr.get("state") != "open" or pr.get("merged"):
+        return None, "pull request is not open"
+    if not str(head.get("ref", "")).startswith("docs-sync/") or base.get("ref") != cfg.target_branch or not REF_RE.match(head.get("ref", "")):
+        return None, f"not an open docs-sync PR into {cfg.target_branch}"
+    author = (pr.get("user") or {}).get("login", "")
+    if not author.endswith("[bot]") or not LOGIN_RE.match(author):
+        return None, "the pull request was not opened by the bot"
+    reviewer = review.get("user") or {}
+    login = reviewer.get("login", "")
+    if login.endswith("[bot]") or reviewer.get("type") == "Bot" or not LOGIN_RE.match(login):
+        return None, "reviewer is a bot or has an invalid login"
+    if review.get("author_association") not in REVIEWER_ASSOCIATIONS:
+        return None, "reviewer is not an owner, member or collaborator"
+    number, review_id, head_sha = pr.get("number"), review.get("id"), head.get("sha", "")
+    if not (isinstance(number, int) and number > 0 and isinstance(review_id, int) and review_id > 0) or not SHA_RE.match(head_sha or ""):
+        return None, "invalid PR number, review id or sha"
+    url = pr.get("html_url", "")
+    pr_info = {"number": number, "url": url if re.match(rf"^https://github\.com/{re.escape(cfg.central)}/pull/\d+$", url, re.I) else "", "merged": False, "by": login, "at": ""}
+    return {"mode": "revise", "source_repo": full_name, "sha": head_sha, "before": "", "target": base["ref"], "files": [], "pr": pr_info,
+            "review_id": review_id, "head_ref": head["ref"]}, ""
+
+
 def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
     short = re.sub(r"[^a-z0-9]", "", j["sha"].lower())[:7]
-    prefix = {"index": "multisync-index-", "review": "multisync-review-", "deploy": "multisync-deploy-"}.get(j["mode"], "multisync-sync-")
+    prefix = {"index": "multisync-index-", "review": "multisync-review-", "deploy": "multisync-deploy-", "revise": "multisync-revise-"}.get(j["mode"], "multisync-sync-")
     name = f"{prefix}{short}-{int(now if now is not None else time.time())}"
+    if j["mode"] == "revise":
+        # No timestamp: GitHub redelivering the same review produces the same name, Kubernetes answers 409 and no second Job starts.
+        name = f"{prefix}{j['pr']['number']}-{j['review_id']}"
 
     def e(k, v):
         return {"name": k, "value": v}
@@ -206,6 +247,8 @@ def job_manifest(cfg: Config, j: dict, now: float | None = None) -> dict:
     pr = j.get("pr")
     if pr:  # review-outcome logging (modes index and review)
         env += [e("PR_NUMBER", str(pr["number"] or "")), e("PR_URL", pr["url"]), e("PR_MERGED", "true" if pr["merged"] else "false"), e("REVIEWED_BY", pr["by"]), e("REVIEWED_AT", pr["at"])]
+    if j["mode"] == "revise":
+        env += [e("REVIEW_ID", str(j["review_id"])), e("HEAD_REF", j["head_ref"])]
     if j["mode"] == "deploy":
         return _deploy_manifest(cfg, name, j)
     return {
@@ -267,6 +310,9 @@ def create_job(cfg: Config, manifest: dict) -> str:
             if res.status != 201:
                 raise RuntimeError(f"kubernetes API {res.status}")
     except urllib.error.HTTPError as e:
+        if e.code == 409:  # same Job name: a redelivery of an event that already started its Job (revise Jobs are named by review id)
+            log.info("job %s already exists", manifest["metadata"]["name"])
+            return manifest["metadata"]["name"]
         raise RuntimeError(f"kubernetes API {e.code}: {e.read()[:300].decode(errors='replace')}") from e
     return manifest["metadata"]["name"]
 

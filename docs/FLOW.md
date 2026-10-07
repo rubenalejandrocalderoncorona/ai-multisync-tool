@@ -28,7 +28,7 @@ flowchart TD
 ## 1. Trigger (webhook receiver, `multisync/webhook.py`)
 1. GitHub sends the event. The HMAC signature is checked; a bad one is rejected.
 2. `push`: accepted only if the repo is in `ALLOWED_REPOS` and the ref is its **default branch**. A push whose `before` is 40 zeros (first push of a branch) sets `FULL_SYNC=1`.
-3. The receiver creates a Kubernetes Job: `sync` (this one), `index` (merged review PR), `review` (review PR closed unmerged), `deploy` (docs site built). The Job gets a 2 h deadline (`JOB_DEADLINE_SECONDS`, max 4 h) and is deleted 5 min after it ends.
+3. The receiver creates a Kubernetes Job: `sync` (this one), `index` (merged review PR), `review` (review PR closed unmerged), `deploy` (docs site built), `revise` (reviewer requested changes, see step 6). The Job gets a 2 h deadline (`JOB_DEADLINE_SECONDS`, max 4 h) and is deleted 5 min after it ends.
 - Not started: repo not allowed, wrong branch, ping, bad signature. Check the receiver log (`kubectl -n multirepo logs deploy/multisync-webhook`) and the GitHub webhook "Recent deliveries".
 
 ## 2. Job start (`scripts/job-entrypoint.sh`, mode `sync`)
@@ -80,6 +80,17 @@ Every decision, per-node log and cost is written to the FactStore (`decisions`, 
 ## 6. Human review (QA)
 The reviewer approves, edits (commits to the branch) or closes the PR. Branch protection needs one approval, and the bot is the author, so the reviewer can approve.
 
+### Review feedback loop
+A reviewer who submits **Request changes** on a bot-authored review PR gets a revision pushed to the same branch.
+| Step | What happens |
+|---|---|
+| Webhook `pull_request_review`, `submitted`, `changes_requested` | Accepted only for an open `docs-sync/*` PR into `qa`, authored by the bot, from a non-bot owner, member or collaborator. Starts a `revise` Job named `multisync-revise-<PR>-<review id>` (a redelivery gets a 409 and starts nothing). |
+| Guards (`revise_pr --plan`, from the GitHub API) | Skips if a `<!-- multisync:revised\|revise-failed\|revise-capped review=ID -->` comment exists for this review, the PR carries `<!-- multisync:superseded -->`, or 3 rounds were already used (then it comments that a human must edit). |
+| Redraft | Source cloned at the commit named in the PR body; each page of the PR is redrafted by the normal pipeline with the review body and inline comments as feedback, the page **as it is on the branch tip** (human edits included) as the base, the model tier stored with the original decision, and the same judge and deterministic gates. No re-indexing. |
+| Push | Only if a page passed the gates: commit `docs: revise after review <id>` as the bot, plain `git push` (fast-forward only, never forced; a concurrent human push makes it fail and nothing is lost). |
+| Comment | One bot comment `<!-- multisync:revised review=<id> -->` with per-page judge scores and what was not changed. If no page passes, `<!-- multisync:revise-failed ... -->` lists the failed checks and nothing is pushed. |
+The bot never approves, dismisses or merges: the reviewer re-reviews. Nothing is written to `review_outcomes` by a revision; at merge the page differs from the first commit, so the existing logic records `draft_with_edition`. Setup: the central repo webhook must also tick **Pull request reviews**; the GitHub App needs no new permission (Pull requests: read and write).
+
 ## 7. Merge into `qa`
 | Step | Who | Effect |
 |---|---|---|
@@ -113,6 +124,8 @@ A human approves and merges the promotion PR into `main`. The workflow closes ev
 | Old PRs stay open | supersede only closes subsets | PR file lists |
 | Ticket missing | no `pending_review` page, or cAImanDesk unreachable | Job log step "review ticket" |
 | No `review_outcomes` row | decision lacks labels, PR superseded, or webhook not delivered | `record_review` output in the index Job |
+| "Request changes" does nothing | webhook lacks the "Pull request reviews" event, reviewer not owner/member/collaborator, PR not bot-authored, 3 rounds used | webhook deliveries, `kubectl -n multirepo get jobs` for `multisync-revise-*`, PR comments with `multisync:revise-*` markers |
+| Revise Job ran, no push | no page passed the judge/deterministic gates (see the `revise-failed` comment), or a human pushed meanwhile (non fast-forward) | Job log, PR comment |
 | `patch_too_broad` | model replaced most sections for a tiny source change | verify_draft note `reasons`, `retainedPct`; the writer is retried with the reason |
 | `patchFallback: true` | patch reply was malformed twice, or named an unknown section | write_draft note `patchError`; the page was fully rewritten (large diff in the PR) |
 | Page not in QA after merge | `index` or `deploy` Job failed | `kubectl -n multirepo get jobs`, `docs-site` workflow run |

@@ -18,6 +18,7 @@ flowchart LR
 |---|---|---|---|
 | `push` | repo is in `ALLOWED_REPOS`, branch is the default branch | `sync` | pipeline, PR into `qa`, ticket |
 | `repository_dispatch` | repo is in `ALLOWED_REPOS` (`client_payload`: repository, sha, before, target_branch, changed_files) | `sync` | same |
+| `pull_request_review` submitted, `changes_requested` | central repo, open bot-authored PR, head `docs-sync/*`, base `qa`, human reviewer | `revise` | pages redrafted with the review as feedback, pushed to the PR branch |
 | `pull_request` closed | central repo, merged, head `docs-sync/*`, base `qa` | `index` | approved pages embedded into Qdrant |
 | `workflow_run` completed | central repo, workflow "Documentation site", success, event push, branch `qa` or `main` | `deploy` | the docs site image `ghcr.io/<central>:<env>-<sha12>` is rolled out to `docs-qa` / `docs-prod` |
 | `ping` | any signed | none | `pong` |
@@ -47,7 +48,7 @@ Add `DOCS_SYNC_PAT` (classic PAT, `repo` + `workflow`) to `multisync-secrets`:
 Read the shared secret once: `ssh vps "sudo -n kubectl -n multirepo get secret multisync-webhook -o jsonpath='{.data.WEBHOOK_SECRET}' | base64 -d"`.
 Then add a webhook (Settings, Webhooks) with payload URL `https://rubenalejandrocalderoncorona.org/api/sync-webhook`, content type `application/json`, that secret:
 - on each source repo (for example `cAImanLabs/cAImanLabsCalendarScheduler`): event **Pushes**;
-- on `rubenalejandrocalderoncorona/multirepo-agent-docs`: events **Pull requests** and **Workflow runs**.
+- on `rubenalejandrocalderoncorona/multirepo-agent-docs`: events **Pull requests**, **Pull request reviews** (review feedback loop) and **Workflow runs**.
 
 Add further source repos to `ALLOWED_REPOS` in `infra/k8s/webhook.yaml`.
 

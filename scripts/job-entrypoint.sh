@@ -4,6 +4,7 @@
 #   JOB_MODE=sync   SOURCE_REPO SOURCE_SHA SOURCE_BEFORE TARGET_BRANCH CHANGED_FILES CENTRAL_REPO
 #   JOB_MODE=index  CENTRAL_REPO BASE_SHA MERGE_SHA  (+ PR_NUMBER PR_URL PR_MERGED REVIEWED_BY REVIEWED_AT: logs the review outcome)
 #   JOB_MODE=review CENTRAL_REPO PR_NUMBER PR_URL PR_MERGED REVIEWED_BY REVIEWED_AT   (a review PR closed without merging: only logs the outcome)
+#   JOB_MODE=revise CENTRAL_REPO TARGET_BRANCH PR_NUMBER PR_URL REVIEW_ID REVIEWED_BY HEAD_REF   (a reviewer requested changes on a bot-authored docs-sync PR)
 # Secrets: DOCS_SYNC_PAT, AI_API_KEY, DEEPSEEK_API_KEY, FACTSTORE_DATABASE_URL, CAIMANDESK_API_TOKEN. Untrusted values are only ever
 # read through variables, never interpolated into code.
 set -euo pipefail
@@ -65,6 +66,63 @@ fi
 if [ "$MODE" = "review" ]; then
   step "record the review outcome of $CENTRAL_REPO#${PR_NUMBER:-?} (closed without merging)"
   python -m multisync.cli.record_review || true
+  exit 0
+fi
+
+if [ "$MODE" = "revise" ]; then
+  : "${PR_NUMBER:?}" "${REVIEW_ID:?}" "${HEAD_REF:?}" "${TARGET_BRANCH:?}"
+  [[ "$PR_NUMBER" =~ ^[0-9]+$ && "$REVIEW_ID" =~ ^[0-9]+$ ]] || fail "invalid PR number or review id"
+  [[ "$HEAD_REF" =~ ^docs-sync/[A-Za-z0-9_.-]+$ ]] || fail "invalid head ref"
+  [[ "$TARGET_BRANCH" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "invalid target branch"
+  step "revise $CENTRAL_REPO#$PR_NUMBER after review $REVIEW_ID"
+  PAT_HEADER=$GIT_CONFIG_VALUE_0
+  clone "$CENTRAL_REPO" central
+  cd central
+  # The branch tip is the base to revise: the bot's first commit plus any human commits. History is never rewritten and there is no force push.
+  git fetch --quiet origin "$HEAD_REF"
+  git checkout --quiet -B "$HEAD_REF" FETCH_HEAD
+  # Config, styles and prompts come from the target branch (as in sync mode); the page text comes from the branch tip.
+  git fetch --quiet origin "$TARGET_BRANCH"
+  git worktree add --quiet --detach "$WORK/central-base" "origin/$TARGET_BRANCH"
+
+  # Comments and the push are done by the GitHub App bot (so the PR stays bot-authored); with only the PAT they would carry the owner's name.
+  if [ -n "${BOT_APP_ID:-}" ] && [ -n "${BOT_APP_PRIVATE_KEY:-}" ] && BOT_TOKEN=$(python -m multisync.cli.app_token); then
+    export GH_TOKEN=$BOT_TOKEN GITHUB_TOKEN=$BOT_TOKEN
+    GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$BOT_TOKEN" | base64 | tr -d '\n')"
+    export GIT_CONFIG_VALUE_0
+    echo "revision will be pushed and commented by the GitHub App bot"
+  else
+    echo "WARNING: no bot token (BOT_APP_ID/BOT_APP_PRIVATE_KEY missing or invalid); the revision is pushed and commented with DOCS_SYNC_PAT" >&2
+  fi
+
+  step "guards"
+  python -m multisync.cli.revise_pr --plan | tee revise-plan.json
+  [ "$(jq -r '.proceed' revise-plan.json)" = "true" ] || { echo "nothing to do: $(jq -r '.reason' revise-plan.json)"; exit 0; }
+  SOURCE_REPO=$(jq -r '.repo' revise-plan.json); SOURCE_SHA=$(jq -r '.sha' revise-plan.json)
+  [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "invalid source repo"
+  [[ "$SOURCE_SHA" =~ ^[0-9a-f]{7,40}$ ]] || fail "invalid source sha"
+
+  step "clone $SOURCE_REPO@${SOURCE_SHA:0:7} (the commit the pages were drafted from)"
+  GIT_CONFIG_VALUE_0=$PAT_HEADER clone "$SOURCE_REPO" source-repo
+  (cd source-repo && git checkout --quiet "$SOURCE_SHA")
+
+  step "redraft with the review as feedback"
+  export SOURCE_REPO SOURCE_DIR="$PWD/source-repo" RUN_ID="revise-$REVIEW_ID"
+  export SITE_REPO="$CENTRAL_REPO" SITE_DIR="$PWD" DOC_STYLES="$WORK/central-base/config/doc-styles.json"
+  export REPOS_CONFIG="$WORK/central-base/config/repos.json" FEATURE_REGISTRY="$WORK/central-base/config/feature-registry.json"
+  export INSTRUCTIONS_FILE="$TOOL/.github/instructions/DocumentationInstructions.instructions.md" TEMPLATES_PATH="$TOOL/docs/templates"
+  [ ! -f "$WORK/central-base/prompts/judge-docs.md" ] || export PROMPTS_DIR="$WORK/central-base/prompts"
+  python -m multisync.cli.revise_pr
+  STATUS=$(jq -r '.status' revise-result.json)
+  if [ "$STATUS" != "revised" ]; then echo "status: $STATUS (nothing is pushed)"; exit 0; fi
+
+  step "commit and push (fast-forward only)"
+  mapfile -t CHANGED < <(jq -r '.changed[]' revise-result.json)
+  git add -- "${CHANGED[@]}"
+  git diff --staged --quiet && { echo "revised pages are identical to the branch tip"; exit 0; }
+  git commit -q -m "docs: revise after review $REVIEW_ID" -m "Requested by ${REVIEWED_BY:-a reviewer} on $CENTRAL_REPO#$PR_NUMBER"
+  git push -q origin "HEAD:refs/heads/$HEAD_REF"
+  HEAD_SHA=$(git rev-parse HEAD) python -m multisync.cli.revise_pr --post || echo "WARNING: pushed, but the revision comment could not be posted" >&2
   exit 0
 fi
 

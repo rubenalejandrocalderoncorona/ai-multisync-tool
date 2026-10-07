@@ -203,6 +203,8 @@ def process_change(change: dict, deps) -> dict:
 
     # ── nodes ────────────────────────────────────────────────────────────────────
     def n_prefilter(s):
+        if deps.get("revision"):  # a reviewer asked for changes to an existing draft: the decision to write was already taken, never skip it as trivial
+            return {"status": "skip", "note": {"reason": "revision after review"}, "update": {"forced": True}}
         if change.get("after") is None:
             auto = policy.get("trust") == "auto"
             return {"status": "deleted", "note": {"reason": "source document removed"},
@@ -237,7 +239,7 @@ def process_change(change: dict, deps) -> dict:
         r = route_change(change, registry, facts, cfg["ai"]["routerForce"])
         return {"note": {"tier": r["tier"], "reasons": r["reasons"], "publicChanged": len(r["signals"]["publicChanged"]), "publicTotal": r["signals"]["total"],
                          "registryHits": len(r["signals"]["registry"]), "referencedBy": r["signals"]["referencedBy"]},
-                "update": {"tier": r["tier"], "routeInfo": r, "metrics": {"diffClassification": r["classification"]}, "ctx": {"route": {"tier": r["tier"], "reasons": r["reasons"]}}}}
+                "update": {"tier": deps.get("forceTier") or r["tier"], "routeInfo": r, "metrics": {"diffClassification": r["classification"]}, "ctx": {"route": {"tier": r["tier"], "reasons": r["reasons"]}}}}
 
     def n_similarity(s):
         hypothetical = None
@@ -351,7 +353,7 @@ def process_change(change: dict, deps) -> dict:
         top_k = t["topKWidened"] if s["widened"] else t["topK"]
         context = _retrieve(vectors, llm, change["repo"], change["after"], s["hypothetical"], s["garQueries"], top_k)
         common = dict(file_path=change["filePath"], source=change["after"], changed_files=changed_files, related_code=s["relatedCode"], fact_sheet=sheet_text(s["factSheet"]),
-                      plan=plan_text(s["plan"]), context=context, policy=policy, style=style, instructions=instructions, feedback=s["feedback"], tier=s["tier"])
+                      plan=plan_text(s["plan"]), context=context, policy=policy, style=style, instructions=instructions, feedback=[*(change.get("reviewFeedback") or []), *s["feedback"]], tier=s["tier"])
         note = {"attempt": s["iter"] + 1, "tier": s["tier"], "escalated": s["escalated"], "widened": s["widened"], "topK": top_k, "contextChunks": len(context),
                 "feedbackItems": len(s["feedback"]), "style": style["key"]}
         base = None if s.get("patchFallback") else patch_base()
