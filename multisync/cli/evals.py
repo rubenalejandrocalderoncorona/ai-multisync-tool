@@ -2,7 +2,7 @@
 
   multisync evals flag-low-scores [--threshold 0.7] [--hours 24] [--ticket]
 
-Lists the drafts scored below the threshold with their change unit, repo and PR link (the source commit while no review PR is recorded), for a human to
+Lists the drafts scored below the threshold (the score is the share of supported claims, 0..1) with their change unit, repo, unsupported quotes and PR link (the source commit while no review PR is recorded), for a human to
 follow up. Exits 0. Only with --ticket does it open a cAImanDesk ticket (one per change unit, no duplicates), through multisync/tickets.py.
 env: PHOENIX_COLLECTOR_ENDPOINT, PHOENIX_API_KEY, PHOENIX_PROJECT_NAME; FACTSTORE_DATABASE_URL (optional: finds the review PR link); CAIMANDESK_* for --ticket.
 """
@@ -23,7 +23,7 @@ def run(argv: list[str], env=None, client=None, facts=None, tickets=None) -> tup
     ap = argparse.ArgumentParser(prog="multisync evals")
     sub = ap.add_subparsers(dest="cmd", required=True)
     fl = sub.add_parser("flag-low-scores")
-    fl.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    fl.add_argument("--threshold", type=float, default=float(env.get("DRAFT_EVALS_THRESHOLD") or DEFAULT_THRESHOLD), help="default 0.7 (the unfaithful band), or DRAFT_EVALS_THRESHOLD")
     fl.add_argument("--hours", type=float, default=24, help="how far back to look for draft spans")
     fl.add_argument("--ticket", action="store_true", help="also open a cAImanDesk ticket per flagged change unit (never without this flag)")
     a = ap.parse_args(argv)

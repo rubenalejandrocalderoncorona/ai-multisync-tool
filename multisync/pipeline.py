@@ -415,7 +415,8 @@ def process_change(change: dict, deps) -> dict:
         with tracing.span("draft", "CHAIN", **{"session.id": run_id, "multisync.repo": change["repo"], "multisync.page": change["filePath"], "multisync.commit": change["commit"],
                                               "multisync.change_unit_id": f"{change['repo']}@{change['commit']}:{change['filePath']}", "multisync.mode": mode,
                                               "multisync.attempt": s["iter"] + 1, "multisync.tier": s["tier"],
-                                              **tracing.document_attrs([{"id": c["id"], "content": c["text"], "score": c["score"]} for c in context])}) as dsp:
+                                              **tracing.document_attrs([{"id": c["id"], "content": c["text"], "score": c["score"]} for c in context]),
+                                              **tracing.source_attrs(change["after"], changed_files)}) as dsp:
             dsp.io(input=f"## Fact sheet\n{common['fact_sheet']}\n\n## Doc plan\n{common['plan']}")
             base, reason = (None, f"patch failed: {s.get('patchError')}") if s.get("patchFallback") else patch_base()
             revision = bool(change.get("revisionPatch"))

@@ -13,8 +13,10 @@ sent as a bearer token. Nothing here can fail a run: any tracing error is swallo
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
+import re
 
 _tracer = None
 _provider = None
@@ -24,6 +26,50 @@ MAX_TEXT = 12000
 def _clip(value, limit: int = MAX_TEXT) -> str:
     text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + f"\n...[{len(text) - limit} more characters not sent]"
+
+
+SOURCE_BUDGET = 30000
+_FILE_BLOCK = re.compile(r"(?m)^### FILE: (.+)\n")
+
+
+def content_capture_enabled(env=None) -> bool:
+    """PHOENIX_CAPTURE_CONTENT=0|false|off|no keeps source text off spans (paths and hashes are still recorded). On by default."""
+    return str((os.environ if env is None else env).get("PHOENIX_CAPTURE_CONTENT", "1")).strip().lower() not in ("0", "false", "off", "no")
+
+
+def source_budget(env=None) -> int:
+    try:
+        return max(0, int((os.environ if env is None else env).get("DRAFT_SOURCE_CHARS", SOURCE_BUDGET)))
+    except ValueError:
+        return SOURCE_BUDGET
+
+
+def source_attrs(snapshot: str, changed_files: list | None = None, budget: int | None = None, capture: bool | None = None) -> dict:
+    """What a draft was written from, bounded: file paths, a sha256 of the whole snapshot, its size, the changed files, and (only when content capture is on)
+    the snapshot text clipped to `budget` characters, changed files first so the part that matters survives the cut."""
+    snapshot = snapshot or ""
+    budget = source_budget() if budget is None else budget
+    capture = content_capture_enabled() if capture is None else capture
+    parts = _FILE_BLOCK.split(snapshot)
+    blocks = [(parts[i], parts[i + 1]) for i in range(1, len(parts) - 1, 2)] if len(parts) > 1 else [("(source)", snapshot)]
+    changed = [str(c) for c in (changed_files or [])]
+    out: dict = {"multisync.source.sha256": hashlib.sha256(snapshot.encode("utf-8", "replace")).hexdigest(), "multisync.source.chars": len(snapshot),
+                 "multisync.source.files": json.dumps([b[0][:200] for b in blocks][:300]), "multisync.source.changed_files": json.dumps([c[:200] for c in changed[:100]])}
+    if not capture or not snapshot or budget <= 0:
+        return out
+    ordered = sorted(blocks, key=lambda b: 0 if b[0] in changed else 1)
+    text, used, cut = [], 0, 0
+    for path, body in ordered:
+        block = f"### FILE: {path}\n{body}"
+        room = budget - used
+        if room <= 0:
+            cut += len(block)
+            continue
+        text.append(block if len(block) <= room else block[:room])
+        used += len(text[-1])
+        cut += len(block) - len(text[-1])
+    out["multisync.source.text"] = "\n".join(text) + (f"\n...[{cut} more characters not recorded]" if cut else "")
+    return out
 
 
 def document_attrs(docs: list[dict], limit: int = 12, chars: int = 1500) -> dict:
