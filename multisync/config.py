@@ -123,6 +123,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AttrDict:
         },
         "alerts": {
             "ticketProvider": g("TICKET_PROVIDER") or "caimandesk",  # caimandesk | github | jira | none
+            # A ticket exists only for a draft waiting in QA (opened with the review PR). A fallback is logged (decision, node_logs, job summary,
+            # Slack when configured) but opens no ticket unless TICKET_ON_FALLBACK=1.
+            "ticketOnFallback": (g("TICKET_ON_FALLBACK") or "").lower() in ("1", "true", "yes"),
             "deskBaseUrl": desk_url,
             "deskToken": g("CAIMANDESK_API_TOKEN") or "",
             "deskProjectId": g("CAIMANDESK_PROJECT_ID") or "",

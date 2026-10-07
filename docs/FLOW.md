@@ -1,0 +1,112 @@
+# End-to-end flow
+
+Every step of one change, from `git push` to production, independent of the model tier. Each step says what happens, what it writes, and where to look when it goes wrong. Thresholds are the defaults in `multisync/config.py` (all overridable by environment variable).
+
+```mermaid
+flowchart TD
+  P[push to the default branch of a source repo] --> W[webhook receiver]
+  W -->|sync Job| S[clone, onboarding guard, context load]
+  S --> U[change units: one per page]
+  U --> G[per page: LangGraph pipeline]
+  G -->|pending_review| PR[bot opens review PR into qa + ticket]
+  G -->|fallback / skipped / refreshed| L[logged only, no PR, no ticket]
+  PR --> R{human review}
+  R -->|merge| I[index Job + review outcome logged]
+  R -->|close| X[outcome logged as rejected]
+  I --> Q[QA site deployed, promotion PR qa to main]
+  Q --> M{human approves promotion}
+  M -->|merge| D[production deployed, tickets closed]
+```
+
+## 0. One-time setup per source repo
+| What | Where |
+|---|---|
+| Entry with `serviceName`, `targetPath`, `mode`, `trust`, `pages[]` (`path`, `kind`, `brief`, `scope`), `exclude`, optional `allowSensitive` | `config/repos.json` in the central repo, read from the **`qa`** branch |
+| Repo allowed to start Jobs | `ALLOWED_REPOS` in `infra/k8s/webhook.yaml`, applied to the cluster |
+| Push webhook to `https://rubenalejandrocalderoncorona.org/api/sync-webhook` (JSON, shared secret `multisync-webhook`) | Source repo settings |
+
+## 1. Trigger (webhook receiver, `multisync/webhook.py`)
+1. GitHub sends the event. The HMAC signature is checked; a bad one is rejected.
+2. `push`: accepted only if the repo is in `ALLOWED_REPOS` and the ref is its **default branch**. A push whose `before` is 40 zeros (first push of a branch) sets `FULL_SYNC=1`.
+3. The receiver creates a Kubernetes Job: `sync` (this one), `index` (merged review PR), `review` (review PR closed unmerged), `deploy` (docs site built). The Job gets a 2 h deadline (`JOB_DEADLINE_SECONDS`, max 4 h) and is deleted 5 min after it ends.
+- Not started: repo not allowed, wrong branch, ping, bad signature. Check the receiver log (`kubectl -n multirepo logs deploy/multisync-webhook`) and the GitHub webhook "Recent deliveries".
+
+## 2. Job start (`scripts/job-entrypoint.sh`, mode `sync`)
+1. **Preflight**: Qdrant and the FactStore (Postgres) must answer, else the Job fails here.
+2. Tokens: `DOCS_SYNC_PAT` clones the repos; model keys come from `multisync-secrets`.
+3. Clone the central repo and check out `qa`; clone the source repo at the pushed SHA.
+4. Build the changed-docs list (docs-mode only; code-mode ignores it).
+
+## 3. Context and guards (`multisync/cli/run_pipeline.py`)
+1. **Site context**: the docs site itself is embedded (terminology, what other pages say). Failure only degrades context.
+2. **Onboarding guard** (code mode): a file in scope that looks sensitive (secret-like path, "confidential" marker) blocks the repo. Nothing is embedded or sent to a model, every page falls back with `onboarding_blocked`. Fix: add to `exclude`, or acknowledge with `allowSensitive`.
+3. **Code context load**: chunk the source files in the pages' scopes, embed them into the code collection in Qdrant, extract public symbols (routes, public classes, config keys) into the `symbols` table and `doc_refs`. Incremental by default, full on the first push or `FULL_SYNC`. Failure makes every code page fall back (`context sync failed`).
+4. **Repo facts**: deterministic facts (language mix, build file, versions, route and config counts) plus README facts that must quote the source verbatim; each fact stores source path, hash and time. A README fact contradicting a deterministic fact is flagged.
+5. **Change units**: docs mode, one per changed markdown file. Code mode, one per declared page whose scope contains a changed file (every page on a full sync).
+
+## 4. Per page: the LangGraph pipeline (`multisync/pipeline.py`)
+| # | Node | What it does | Ends the page with |
+|---|---|---|---|
+| 1 | prefilter | Diff smaller than 3 lines is not worth a draft unless forced. A removed source produces a delete decision. | `skipped` |
+| 2 | cross_repo | If the change mentions a symbol of the cross-repo registry, every repo owning that feature must have it. | `fallback: cross_repo_incomplete` |
+| 3 | route | Free, no model: classify `internal` vs `public_interface` (changed public symbol, route, config key, registry hit, or symbol other docs mention) and pick the tier: cheap or expensive. | |
+| 4 | similarity | Embed a hypothetical paragraph of what the docs would say, compare to the approved page. Similarity at least 0.92 means the page already says it. | `refreshed` (page re-keyed, no PR) |
+| 5 | code_context, gar, semantic_context | Retrieve code and doc chunks (top 12 code chunks, 30 000 char budget, drop cosine below 0.45), generate the hypothetical answer, add related pages. | |
+| 6 | write_draft | Draft with the chosen tier, the page brief, style, outline and facts. | |
+| 7 | verify_draft | Deterministic, no model: required symbols named, structure, front matter. A cheap draft that fails is redone once on the expensive tier without using an attempt. | back to 6 |
+| 8 | judge | Model judge scores precision (at least 0.9), recall (0.85), core recall (1.0), style (0.7), quality (0.75) and lists unsupported claims. Malformed JSON is retried once. | |
+| 9 | polish_draft | If only style or grounded-wording tags failed, polish once instead of rewriting. | back to 8 |
+| 10 | loop and widen | Up to 3 attempts; then one automatic retry with expanded retrieval (up to 6 attempts in total). | |
+| 11 | publish | Add front matter (`source`, `commit`), change history, store the judged claims. Trust `review` gives `pending_review`; trust `auto` gives `published`. | `pending_review` / `published` |
+| 12 | fallback | Loop did not converge (`iteration_cap_exceeded`) or any exception (`pipeline_error`, `onboarding_blocked`). Nothing is published. | `fallback` |
+
+Every decision, per-node log and cost is written to the FactStore (`decisions`, `node_logs`) and traced to Phoenix.
+
+## 5. Publish and review PR (end of the entrypoint)
+1. `published` pages (trust auto) are pushed straight to the target branch.
+2. `pending_review` pages: branch `docs-sync/<repo-slug>-<sha7>`, one commit, force-pushed.
+3. **Bot token**: the Job mints a GitHub App installation token (`BOT_APP_ID`, `BOT_APP_PRIVATE_KEY`) and pushes and opens the PR with it. If it cannot, it warns and uses the PAT; such a PR cannot be approved by its owner.
+4. PR into `qa` with a table of judge scores. An existing PR for the same branch is edited, not duplicated.
+5. **Supersede**: older open `docs-sync/<same repo>-*` PRs are closed only if every page they hold is also in the new PR, and are marked `<!-- multisync:superseded -->` so they are not logged as rejections.
+6. **Ticket (cAImanDesk)**: opened or reused only here, for a draft waiting in QA; its link and marker go into the PR body. Fallbacks open **no** ticket (`TICKET_ON_FALLBACK=1` restores that); they appear in the Job summary and the FactStore.
+7. If no page is `pending_review`, the Job prints "nothing needs review" and exits: no PR, no ticket.
+
+## 6. Human review (QA)
+The reviewer approves, edits (commits to the branch) or closes the PR. Branch protection needs one approval, and the bot is the author, so the reviewer can approve.
+
+## 7. Merge into `qa`
+| Step | Who | Effect |
+|---|---|---|
+| Webhook `pull_request` closed, merged, head `docs-sync/*` | receiver | starts the `index` Job |
+| `index` Job | cluster | embeds the merged pages as approved docs (replaces old chunks, deletes removed pages); then `record_review` |
+| `record_review` | cluster | one `review_outcomes` row per page: `draft_with_noedition` (merged unchanged), `draft_with_edition` (merged edited), reviewer and time; 10 % of unchanged ones are sampled for a second-person audit. A page whose stored decision lacks classification, tier or policy version is skipped, never guessed. |
+| Actions workflow `qa` job | GitHub | notes the ticket "deployed to QA"; opens or extends the rolling `qa` to `main` promotion PR (bot token once the Actions secrets exist) |
+| `docs-site` workflow, then `workflow_run` webhook | GitHub, receiver | builds the image, starts a `deploy` Job that rolls out `docs-qa` |
+
+A review PR closed **unmerged** starts a `review` Job: logs `draft_rejected` rows (unless superseded) and notes the ticket; nothing is indexed.
+
+## 8. Promotion to production
+A human approves and merges the promotion PR into `main`. The workflow closes every ticket named in it; the docs-site build and a `deploy` Job roll out `docs-prod`.
+
+## 9. Metrics (read-only)
+`multisync metrics review-readiness --segment CLASS:TIER` gives the Wilson lower bound of the no-edit rate (needs at least 30 reviews and a lower bound of 0.85). `audit-gap` compares audited accuracy to the raw no-edit rate. Nothing reads these to approve anything; `auto_approval_eligible` stays false.
+
+## Where to look when something goes wrong
+| Symptom | Likely cause | Look at |
+|---|---|---|
+| No Job after a push | repo not in `ALLOWED_REPOS`, not the default branch, bad signature | receiver log, GitHub webhook deliveries |
+| Job fails at preflight | Qdrant or Postgres unreachable | Job log (kept 5 min) |
+| Every page `onboarding_blocked` | sensitive-looking file in scope | `python -m multisync.cli.onboard_check` |
+| Every page `pipeline_error` / context failed | embedding model or Qdrant error | `node_logs`, `python -m multisync.cli.runs` |
+| Page `skipped` | diff under 3 lines | decision reason |
+| Page `refreshed`, no PR | similarity 0.92 or more: docs already match | decision metrics `minChunkSimilarity` |
+| `cross_repo_incomplete` | a registered feature is missing in one repo | decision reason lists the repo |
+| `iteration_cap_exceeded` | judge never passed in 6 attempts | decision `attempts`, Phoenix trace |
+| Job killed after 2 h | many pages, slow models | raise `JOB_DEADLINE_SECONDS` |
+| PR authored by the owner | bot secrets missing or token failed | Job log line `WARNING: no bot token` |
+| Old PRs stay open | supersede only closes subsets | PR file lists |
+| Ticket missing | no `pending_review` page, or cAImanDesk unreachable | Job log step "review ticket" |
+| No `review_outcomes` row | decision lacks labels, PR superseded, or webhook not delivered | `record_review` output in the index Job |
+| Page not in QA after merge | `index` or `deploy` Job failed | `kubectl -n multirepo get jobs`, `docs-site` workflow run |
+
+Job logs disappear 5 minutes after the Job ends: use `python -m multisync.cli.runs` (reads Postgres) or Phoenix at `/phoenix`.

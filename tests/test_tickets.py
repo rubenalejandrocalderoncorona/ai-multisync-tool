@@ -162,7 +162,7 @@ def test_mcp_the_api_token_is_a_bearer_header_a_wrong_token_yields_no_ticket_and
     m = FakeMcp(token="right")
     try:
         assert create_tickets(mcp_cfg(m.url, "right")).open_review(**REVIEW)
-        assert escalate({"repo": "o/r", "path": "a.md", "rootCauseTag": "x", "attempts": []}, {"ticketProvider": "caimandesk", **mcp_cfg(m.url, "wrong")}) is None
+        assert escalate({"repo": "o/r", "path": "a.md", "rootCauseTag": "x", "attempts": []}, {"ticketProvider": "caimandesk", "ticketOnFallback": True, **mcp_cfg(m.url, "wrong")}) is None
     finally:
         m.close()
 
@@ -175,7 +175,7 @@ def test_mcp_fallback_tickets_work_and_an_unreachable_server_returns_none():
         assert re.search(r"tasks/\d+$", url)
     finally:
         m.close()
-    assert escalate({"repo": "o/r", "path": "a.md", "rootCauseTag": "x", "attempts": []}, {"ticketProvider": "caimandesk", **mcp_cfg("http://127.0.0.1:9/api/v2/mcp")}) is None
+    assert escalate({"repo": "o/r", "path": "a.md", "rootCauseTag": "x", "attempts": []}, {"ticketProvider": "caimandesk", "ticketOnFallback": True, **mcp_cfg("http://127.0.0.1:9/api/v2/mcp")}) is None
 
 
 def test_ticket_refs_from_body_a_promotion_pr_carries_one_marker_per_batch_duplicates_collapse():
