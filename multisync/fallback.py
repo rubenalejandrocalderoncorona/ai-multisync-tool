@@ -52,7 +52,7 @@ def _open_jira_issue(d, a, client):
 
 def escalate(d: dict, alerts, transport: httpx.BaseTransport | None = None) -> str | None:
     ticket = None
-    provider = alerts.get("ticketProvider")
+    provider = alerts.get("ticketProvider") if alerts.get("ticketOnFallback") else None
     with httpx.Client(transport=transport, timeout=30) as client:
         try:
             if provider == "caimandesk":

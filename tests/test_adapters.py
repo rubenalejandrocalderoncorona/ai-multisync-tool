@@ -59,7 +59,7 @@ def test_fallback_opens_a_github_issue_with_the_failed_checks_and_pings_slack():
     ticket = escalate(
         {"repo": "org/svc", "path": "docs/a.md", "commit": "c1", "reviewerAction": "auto_rejected", "rootCauseTag": "iteration_cap_exceeded", "reason": "no converge",
          "attempts": [{"n": 1, "precision": 0.5, "recall": 1, "style": 1, "quality": 1, "failure": "hallucinated_claim"}], "feedback": ["Unsupported claim: x"], "draft": "# d"},
-        {"ticketProvider": "github", "githubToken": "t", "githubRepo": "org/central", "slackWebhook": "https://hooks/slack"}, transport)
+        {"ticketProvider": "github", "ticketOnFallback": True, "githubToken": "t", "githubRepo": "org/central", "slackWebhook": "https://hooks/slack"}, transport)
     assert ticket == "https://gh/issue/1"
     issue = next(c for c in calls if "/repos/org/central/issues" in c["url"])
     assert "iteration_cap_exceeded" in issue["body"]["body"]
@@ -72,7 +72,7 @@ def test_fallback_never_raises_when_delivery_fails():
         raise httpx.ConnectError("network down")
 
     t = escalate({"repo": "o/r", "path": "p", "rootCauseTag": "x", "attempts": []},
-                 {"ticketProvider": "github", "githubToken": "t", "githubRepo": "o/c", "slackWebhook": "https://h"}, httpx.MockTransport(boom))
+                 {"ticketProvider": "github", "ticketOnFallback": True, "githubToken": "t", "githubRepo": "o/c", "slackWebhook": "https://h"}, httpx.MockTransport(boom))
     assert t is None
 
 

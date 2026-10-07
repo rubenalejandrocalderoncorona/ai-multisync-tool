@@ -98,7 +98,7 @@ def desk(existing=None):
     return httpx.MockTransport(handler), calls
 
 
-ALERTS = {"ticketProvider": "caimandesk", "deskTransport": "rest", "deskBaseUrl": "https://tickets.example", "deskToken": "tok", "deskProjectId": "7"}
+ALERTS = {"ticketProvider": "caimandesk", "ticketOnFallback": True, "deskTransport": "rest", "deskBaseUrl": "https://tickets.example", "deskToken": "tok", "deskProjectId": "7"}
 FAILURE = {"repo": "org/svc", "path": "docs/a.md", "commit": "c1", "reviewerAction": "auto_rejected", "rootCauseTag": "iteration_cap_exceeded", "reason": "did not converge",
            "attempts": [{"n": 1, "precision": 0.4, "recall": 1, "style": 1, "quality": 1, "failure": "hallucinated_claim"}], "feedback": ["Unsupported claim: <script>"], "draft": "# d"}
 
@@ -131,4 +131,10 @@ def test_desk_closed_task_does_not_suppress_a_new_ticket():
 def test_desk_unconfigured_token_yields_no_ticket_and_no_network_call():
     transport, calls = desk()
     assert escalate(FAILURE, {**ALERTS, "deskToken": ""}, transport) is None
+    assert calls == []
+
+
+def test_a_fallback_opens_no_ticket_by_default():
+    transport, calls = desk()
+    assert escalate(FAILURE, {**ALERTS, "ticketOnFallback": False}, transport) is None
     assert calls == []
