@@ -175,3 +175,83 @@ def doc_diff(before: str | None, after: str | None, path: str = "document.md", m
         if len(text) <= max_chars:
             return text
     return text[:max_chars] + "\n[diff truncated]"
+
+
+# ── scoping a patch ──────────────────────────────────────────────────────────
+STOPWORDS = {"private", "public", "protected", "static", "final", "const", "return", "class", "import", "package", "void", "string", "this", "that", "with",
+             "from", "true", "false", "null", "else", "elif", "def", "var", "let", "int", "long", "new", "the", "and", "for", "not", "file", "diff", "index"}
+WORD = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*|\d+")
+
+
+def _norm(token: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", token.lower())
+
+
+def _tokens(text: str) -> set[str]:
+    out = set()
+    for w in WORD.findall(text or ""):
+        n = _norm(w)
+        if (w.isdigit() and len(w) >= 2) or (not w.isdigit() and len(n) >= 4 and n not in STOPWORDS):
+            out.add(n)
+    return out
+
+
+def diff_tokens(diff_text: str, extra=()) -> set[str]:
+    """Normalised tokens (lower case, no punctuation) of what the diff added or removed (not its context lines), plus `extra` names (changed
+    symbols, changed file names)."""
+    lines = [l[1:] for l in (diff_text or "").splitlines() if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+    toks = _tokens("\n".join(lines))
+    for e in extra or []:
+        base = re.sub(r"\.[A-Za-z0-9]+$", "", str(e).rsplit("/", 1)[-1])
+        toks |= {_norm(w) for w in WORD.findall(base) if len(_norm(w)) >= 4} | ({_norm(base)} if len(_norm(base)) >= 4 else set())
+    return toks
+
+
+def _identifier_like(text: str) -> set[str]:
+    """What makes a rewrite more than a style change: numbers, code spans, paths and identifiers (snake_case, camelCase, CONSTANT)."""
+    out = set(re.findall(r"\d+", text or ""))
+    out |= set(re.findall(r"`([^`]+)`", text or ""))
+    out |= set(re.findall(r"/[A-Za-z0-9_{}\-./]+", text or ""))
+    out |= {w for w in re.findall(r"[A-Za-z_$][A-Za-z0-9_$]*", text or "") if "_" in w or re.search(r"[a-z][A-Z]", w) or (w.isupper() and len(w) > 2)}
+    return out
+
+
+def drop_unrelated(sections: list[dict], ops, diff_text: str, extra=()) -> tuple[list, list[dict]]:
+    """Conservative deterministic guard. A `replace` whose old and new text differ only in style (the new text introduces no number, code span, path or
+    identifier) and that has no connection to the change (no diff token in the old text, none introduced by the new text) is dropped: the section stays
+    byte-identical. Inserts and deletes are never dropped. Returns (kept ops, [{section, reason}])."""
+    toks = diff_tokens(diff_text, extra)
+    if not toks:
+        return list(ops), []
+    by_id = {s["id"]: s for s in sections}
+    kept, dropped = [], []
+    for op in ops:
+        s = by_id.get(op.get("section")) if isinstance(op, dict) else None
+        if not s or op.get("op") != "replace":
+            kept.append(op)
+            continue
+        old, new = s["text"], str(op.get("text") or "")
+        old_norm, new_norm = _norm(old), _norm(new)
+        related = any(t in old_norm for t in toks) or any(t in new_norm and t not in old_norm for t in toks)
+        if not related and not (_identifier_like(new) - _identifier_like(old)):
+            dropped.append({"section": s["id"], "reason": "patch_unrelated_edit"})
+        else:
+            kept.append(op)
+    return kept, dropped
+
+
+def scope_of(sections: list[dict], ops) -> dict:
+    """The text a patched page is judged on. changedText: the new text of every replaced and inserted section (and a note per deleted one);
+    unchangedText: every section the operations left alone (read-only context); changedIds: what the change touches, named for the feedback."""
+    ops = _clean_ops(sections, ops)
+    replaced = {o["section"] for o in ops if o["op"] == "replace"}
+    deleted = {o["section"] for o in ops if o["op"] == "delete"}
+    changed = [o["text"].strip("\n") for o in ops if o["op"] in ("replace", "insert_after")]
+    changed += [f"(section removed: {sid})" for sid in sorted(deleted)]
+    ids = [o["section"] for o in ops if o["op"] in ("replace", "delete")]
+    for o in ops:
+        if o["op"] == "insert_after":
+            m = HEADING.match(o["text"].lstrip("\n").split("\n", 1)[0])
+            ids.append(f"new section after {o['section']}" + (f": {m.group(2)}" if m else ""))
+    unchanged = "".join(s["text"] for s in sections if s["id"] not in replaced | deleted)
+    return {"changedText": "\n\n".join(changed), "unchangedText": unchanged, "changedIds": ids}

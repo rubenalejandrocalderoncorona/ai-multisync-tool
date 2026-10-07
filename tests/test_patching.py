@@ -166,7 +166,7 @@ def test_unknown_section_id_falls_back():
 
 def test_patch_too_broad_is_rejected_with_feedback_then_redone():
     secs = split_sections(API_PAGE)
-    broad = [{"op": "replace", "section": s["id"], "text": s["text"].rstrip("\n") + "\n\nExtra sentence."} for s in secs[1:7]]
+    broad = [{"op": "replace", "section": s["id"], "text": s["text"].rstrip("\n") + "\n\nExtra sentence: the limit is `MAX_ITEMS` = 77."} for s in secs[1:7]]
     llm = fake_llm([PASS_JUDGE], patches=[{"operations": broad}, {"operations": [good_op()]}])
     d = run(llm)
     assert d["outcome"] == "pending_review"

@@ -118,6 +118,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AttrDict:
             "patchDocsMode": _num(g("PATCH_DOCS_MODE"), 1),  # 0: an edited source doc is redrafted whole again (docs mode)
             "patchRevisions": _num(g("PATCH_REVISIONS"), 1),  # 0: the revise Job redrafts the whole page again
             "revisePatchMaxSectionShare": _num(g("REVISE_PATCH_MAX_SECTION_SHARE"), 1.0),  # drift guard share for revisions; 1.0 = guard off
+            "patchMinImprovement": _num(g("PATCH_MIN_IMPROVEMENT"), 0.05),  # patch draft: stop early when best recall has not improved by this much over attempt 1 ...
+            "patchConvergeAfter": _num(g("PATCH_CONVERGE_AFTER"), 3),  # ... checked once this many attempts failed the judge; 0 turns the check off
+            "patchScopedJudge": _num(g("PATCH_SCOPED_JUDGE"), 1),  # 0: a patched page is judged whole against the whole snapshot again
             "contextMinScore": _num(g("CONTEXT_MIN_SCORE"), 0.45),  # retrieved chunks below this cosine score are dropped
         },
         # off | warn | block: the automatic linked-repos gate. Overrides a repo's own `crossRepoGate`; empty means "use the repo's, else block".

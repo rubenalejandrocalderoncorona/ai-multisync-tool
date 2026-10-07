@@ -13,6 +13,7 @@ from . import patching
 from . import writer as W
 
 PATCH_TOO_BROAD = "patch_too_broad"
+PATCH_UNRELATED_EDIT = "patch_unrelated_edit"
 SANE = {"minChars": 200, "maxChars": 120_000, "minRatioOfExisting": 0.25, "maxRatioOfExisting": 4, "mentionRatio": 0.6, "maxNamesChecked": 40}
 
 
@@ -22,12 +23,24 @@ def mentioned(text: str, name: str) -> bool:
 
 def verify_draft(draft: str, names: list[str] | None = None, existing: str = "", file_path: str = "", title: str | None = None,
                  description: str | None = None, thresholds: dict | None = None, patch: dict | None = None) -> dict:
-    """{ok, reasons, metrics}. `patch` (section-patch drafting only): {base, sectionsTotal, sectionsChanged, diffLines, maxShare, smallLines,
-    minSections}; adds retainedPct and the patch_too_broad check."""
+    """{ok, reasons, metrics, draft, ops}. `patch` (section-patch drafting only): {base, sectionsTotal, sectionsChanged, diffLines, maxShare, smallLines,
+    minSections} adds retainedPct and the patch_too_broad check. With {sections, ops, diffText} (not for revisions) it first drops every `replace`
+    that has no connection to the change (patching.drop_unrelated): the section stays byte-identical, `metrics.droppedOps` names it, and the
+    returned `draft` is the page assembled without it (this is not a failure)."""
     t = {**SANE, **(thresholds or {})}
     reasons: list[str] = []
     metrics: dict = {}
     text = draft or ""
+    ops = patch.get("ops") if patch else None
+    if patch and ops and patch.get("sections") and not patch.get("revision"):
+        kept, dropped = patching.drop_unrelated(patch["sections"], ops, patch.get("diffText") or "", patch.get("extraTokens") or ())
+        if dropped:
+            ops = kept
+            text = patching.apply_operations(patch["sections"], kept)
+            ch = patching.changed_ids(patch["sections"], kept)
+            patch = {**patch, "sectionsChanged": len(set(ch["replaced"]) | set(ch["deleted"]))}
+            metrics["droppedOps"] = [{**d, "tag": PATCH_UNRELATED_EDIT} for d in dropped]
+            metrics["sectionsChanged"] = patch["sectionsChanged"]
 
     # 1. mentions
     check = sorted(set(names or []))[: t["maxNamesChecked"]]
@@ -83,4 +96,4 @@ def verify_draft(draft: str, names: list[str] | None = None, existing: str = "",
             reasons.append(f"{PATCH_TOO_BROAD}: the operations replaced or deleted {changed} of {total} sections ({round(share * 100)}%) for a source change of only "
                            f"{patch['diffLines']} line(s). Change only the sections whose facts this change contradicts or leaves missing, and leave every other section out of the list.")
 
-    return {"ok": not reasons, "reasons": reasons, "metrics": metrics}
+    return {"ok": not reasons, "reasons": reasons, "metrics": metrics, "draft": text, "ops": ops}

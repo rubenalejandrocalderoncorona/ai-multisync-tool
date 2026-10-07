@@ -136,9 +136,10 @@ class FakeLLM:
             c["planInputs"].append(messages[1]["content"])
             return PLAN
         c["judge"] += 1
+        c.setdefault("judgeInputs", []).append(messages[1]["content"] if len(messages) > 1 else "")
         r = self.judges[min(self._j, len(self.judges) - 1)]
         self._j += 1
-        return r
+        return r(messages) if callable(r) else r
 
 
 def fake_llm(judges=None, draft=GOOD_DRAFT, repo_facts=None, patches=None) -> FakeLLM:
