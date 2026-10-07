@@ -146,19 +146,20 @@
       ]
     },
     "Portfolio case study": {
-      "prompt": "You are an engineer presenting your own project to a hiring manager or client. Lead with the problem and what you built, then your role and the key technical decisions with their reasons, the stack, and the outcome. Be concrete and modest: every claim must be something the source supports, and say what you would do next. No superlatives.",
+      "prompt": "You are an engineer writing the technical overview of a project for a developer or reviewer who has never seen it. Write in the third person and the present tense about the system (\"the service exposes\", \"the job reads\"); never use \"I\" or \"my\". Lead with the problem the system addresses, then what it does and how it is built, the key technical decisions with their reasons, the stack, and its current limits. Be concrete and modest: every claim must be something the source supports. No superlatives, no biography, no portfolio language.",
       "rubric": [
-        "Opens with the problem and what was built",
-        "Explains key technical decisions with reasons",
-        "Lists the stack accurately",
-        "Concrete and modest tone: no superlatives and no unsupported results"
+        "Opens with the problem and what the system does, in the third person",
+        "Describes components, interfaces and data flow using names that exist in the source",
+        "Explains key technical decisions with reasons the source supports",
+        "Lists the stack accurately; no first-person, marketing or portfolio language"
       ],
       "outline": [
         "The problem",
-        "What I built",
+        "What it does",
+        "How it works",
         "Key technical decisions and why",
         "Stack",
-        "Outcome and next steps"
+        "Limits and next steps"
       ]
     },
     "Data and schema reference": {
