@@ -19,8 +19,9 @@ def _clamp01(n) -> float:
 
 
 def judge(llm, *, mode="docs", source="", draft="", known_facts=None, style_text="", existing="", changed_files=None,
-          related_code="", fact_sheet="", plan="", tier=None) -> dict:
-    """mode 'docs': source is a doc file. mode 'code': source is a code snapshot."""
+          related_code="", fact_sheet="", plan="", tier=None, scope: dict | None = None) -> dict:
+    """mode 'docs': source is a doc file. mode 'code': source is a code snapshot. `scope` (a patched page): {changedText, unchangedText, changedIds,
+    diffText, changedFiles, symbols}; the judge then evaluates the changed sections, with the carried-over page as read-only context."""
     known_facts = known_facts or []
     changed_files = changed_files or []
     prompt = P.load_prompt("judge-code" if mode == "code" else "judge-docs")
@@ -31,7 +32,16 @@ def judge(llm, *, mode="docs", source="", draft="", known_facts=None, style_text
                 f"DRAFT:\n{draft}\n\nKNOWN_FACTS:\n{kf}\n\nSTYLE:\n{style_text or '(none)'}")
     else:
         user = f"SOURCE:\n{source}\n\nDRAFT:\n{draft}\n\nKNOWN_FACTS:\n{kf}\n\nSTYLE:\n{style_text or '(none)'}"
-    messages = [{"role": "system", "content": prompt["text"]}, {"role": "user", "content": user}]
+    system = prompt["text"]
+    if scope:
+        patch_prompt = P.load_prompt("judge-patch-scope")
+        system = f"{system}\n\n{patch_prompt['text']}"
+        user = user.replace(f"DRAFT:\n{draft}", (f"CHANGED_SECTIONS:\n{scope.get('changedText') or '(none: the page is unchanged)'}\n\n"
+                                                  f"UNCHANGED_PAGE (read-only):\n{scope.get('unchangedText') or '(none)'}\n\n"
+                                                  f"CHANGE_SCOPE:\nchanged files: {', '.join(scope.get('changedFiles') or []) or '(unknown)'}\n"
+                                                  f"changed public symbols: {', '.join(scope.get('symbols') or []) or '(none detected)'}\n"
+                                                  f"source diff:\n{(scope.get('diffText') or '(not available)')[:6000]}"), 1)
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     try:
         r = llm.chat_json(messages, tier=tier)
     except ValueError:
@@ -53,6 +63,8 @@ def judge(llm, *, mode="docs", source="", draft="", known_facts=None, style_text
         "unsupported": [c.get("text") for c in claims if not c.get("supported")],
         "missing": [f.get("text") for f in facts if not f.get("covered")],
         "notes": [n for n in r.get("notes", []) if n] if isinstance(r.get("notes"), list) else [],
+        "carriedOverUnsupported": [c.get("text") for c in (r.get("carriedOver") if scope and isinstance(r.get("carriedOver"), list) else [])
+                                   if isinstance(c, dict) and not c.get("supported") and c.get("text")],
         "promptId": prompt["id"],
     }
 

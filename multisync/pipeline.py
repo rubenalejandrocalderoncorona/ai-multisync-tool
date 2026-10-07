@@ -86,6 +86,7 @@ class State(TypedDict, total=False):
     patch: Any
     patchFallback: bool
     patchError: str
+    noConverge: Any
     linkedPoints: Any
 
 
@@ -437,7 +438,8 @@ def process_change(change: dict, deps) -> dict:
                     n_changed = len(set(ch["replaced"]) | set(ch["deleted"]))
                     out = {"text": p_out["text"], "promptId": p_out["promptId"]}
                     patch_state = {"base": base, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "diffLines": 0 if revision else diff_line_count(change.get("before"), change["after"])["total"],
-                                   "revision": revision}
+                                   "revision": revision, "sections": sections, "ops": p_out["operations"],
+                                   "diffText": patch_reviewer_request() if revision else extra["diff_text"], "symbols": names, "extraTokens": [*names, *changed_files]}
                     metrics = {"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed,
                                "draftMode": f"patch ({n_changed} of {len(sections)} sections changed)"}
                     note.update({"patchMode": True, "sectionsTotal": len(sections), "sectionsChanged": n_changed, "inserted": len(ch["inserted"]),
@@ -474,46 +476,76 @@ def process_change(change: dict, deps) -> dict:
                          plan.get("purpose") or change.get("brief") or "Generated documentation.", patch=patch)
         note = {"tier": s["tier"], "ok": v["ok"], **v["metrics"], **({} if v["ok"] else {"reasons": v["reasons"][:4]})}
         retained = {"retainedPct": v["metrics"]["retainedPct"]} if "retainedPct" in v["metrics"] else {}
+        # Unrelated replace operations were dropped (those sections stay byte-identical): carry the assembled page and the remaining operations on.
+        dropped_update: dict = {}
+        if v["metrics"].get("droppedOps"):
+            dropped_update = {"draft": v["draft"], "patch": {**s["patch"], "ops": v["ops"], "sectionsChanged": v["metrics"]["sectionsChanged"]},
+                              "metrics": {"sectionsChanged": v["metrics"]["sectionsChanged"], "draftMode": f"patch ({v['metrics']['sectionsChanged']} of {s['patch']['sectionsTotal']} sections changed)"}}
         cov = None
         if v["metrics"].get("mentioned"):
             got, total = (int(x) for x in v["metrics"]["mentioned"].split("/"))
             cov = round(100.0 * got / total, 1) if total else None
         if v["ok"]:
-            return {"note": note, "update": {"verifyFailed": False, "metrics": {"symbolCoverage": cov, **retained}}}
+            return {"note": note, "update": {"verifyFailed": False, **dropped_update, "metrics": {"symbolCoverage": cov, **retained, **dropped_update.get("metrics", {})}}}
         if s["tier"] == "cheap" and not s["escalated"]:
             return {"status": "escalate", "note": {**note, "escalatedTo": "expensive"},
                     "update": {"tier": "expensive", "escalated": True, "escalatePending": True, "feedback": v["reasons"], "iter": s["iter"] - 1}}  # the redo is free
         tag = PATCH_TOO_BROAD if any(r.startswith(PATCH_TOO_BROAD) for r in v["reasons"]) else "deterministic_check"
         attempt = {"n": s["iter"], "widened": s["widened"], "topK": t["topKWidened"] if s["widened"] else t["topK"], "failure": tag, "tier": s["tier"]}
         return {"status": "rejected", "note": note,
-                "update": {"verifyFailed": True, "failure": {"tag": tag, "feedback": v["reasons"]}, "feedback": v["reasons"], "attempts": [attempt], "accepted": None,
-                           "metrics": {"symbolCoverage": cov, **retained}}}
+                "update": {"verifyFailed": True, **dropped_update, "failure": {"tag": tag, "feedback": v["reasons"]}, "feedback": v["reasons"], "attempts": [attempt], "accepted": None,
+                           "metrics": {"symbolCoverage": cov, **retained, **dropped_update.get("metrics", {})}}}
 
     def n_judge(s):
         judge_tier = s["tier"] if cfg["ai"]["judgeTier"] == "follow" else cfg["ai"]["judgeTier"]
+        # A patched page is judged on what the change is responsible for: the changed sections are the text under evaluation, the carried-over
+        # (already approved) sections are read-only context. Full drafts, first drafts and fallbacks to a full rewrite are judged whole.
+        patch_s = s.get("patch")
+        scope = None
+        if patch_s and t["patchScopedJudge"] and patch_s.get("sections") is not None:
+            scope = {**patching.scope_of(patch_s["sections"], patch_s.get("ops") or []), "diffText": patch_s.get("diffText") or "",
+                     "changedFiles": changed_files, "symbols": patch_s.get("symbols") or []}
         verdict = run_judge(llm, tier=judge_tier, mode=mode, source=change["after"], draft=s["draft"], known_facts=s["knownFacts"], style_text=s["styleText"],
                             existing=change.get("existing") or "", changed_files=changed_files, related_code=s["relatedCode"], fact_sheet=sheet_text(s["factSheet"]),
-                            plan=plan_text(s["plan"]))
+                            plan=plan_text(s["plan"]), scope=scope)
         failure = evaluate(verdict, t)
+        if failure and scope and scope["changedIds"]:
+            # The next attempt must not "fix" sections the change never touched.
+            failure = {**failure, "feedback": [*failure["feedback"], "Only these sections may be changed: " + "; ".join(scope["changedIds"]) + ". Leave every other section out of the operations."]}
         # Deterministic completeness (code mode, styles that opt in): every declared name must be in the page.
         cov = check_coverage(s["draft"], change["after"], style.get("coverage")) if mode == "code" else None
+        if cov and scope:  # a patched page owes only the declared names the diff touches; the rest was approved before
+            diff_names = [m for m in cov["missing"] if ":".join(m.split(":")[1:]) in (scope["diffText"] or "")]
+            cov = {**cov, "missing": diff_names, "ok": not diff_names}
         if cov and not cov["ok"]:
             names = [":".join(m.split(":")[1:]) for m in cov["missing"][:40]]
             total = sum(k["total"] for k in cov["kinds"].values())
             fb = f"Incomplete: {len(cov['missing'])} of {total} declared names are not documented. Add every one of: {', '.join(names)}{', ...' if len(cov['missing']) > 40 else ''}"
             failure = {**failure, "feedback": [*failure["feedback"], fb]} if failure else {"tag": "incomplete_coverage", "feedback": [fb]}
         polishable = bool(failure and failure["tag"] in GROUNDED_ONLY_TAGS and not s["polished"] and not s.get("patch"))
+        # Budget guard (patch drafts): stop when the scores are not improving instead of spending the remaining attempts.
+        no_converge = None
+        if failure and patch_s and t["patchConvergeAfter"] and s["iter"] >= t["patchConvergeAfter"]:
+            judged = [a for a in s["attempts"] if a.get("recall") is not None]
+            recalls = [a["recall"] for a in judged] + [verdict["recall"]]
+            precisions = [a["precision"] for a in judged] + [verdict["precision"]]
+            if (len(recalls) >= 2 and max(recalls) - recalls[0] < t["patchMinImprovement"] and max(precisions) - precisions[0] < t["patchMinImprovement"]):
+                no_converge = {"firstRecall": round(recalls[0], 3), "bestRecall": round(max(recalls), 3), "minImprovement": t["patchMinImprovement"],
+                               "attempts": s["iter"], "attemptsAvoided": max(t["maxIterations"] * 2 - s["iter"], 0)}
         scores = {"precision": verdict["precision"], "recall": verdict["recall"], "style": verdict["style"], "quality": verdict["quality"]}
         note = {**scores,
                 **({"coverage": {k: f"{v['found']}/{v['total']}" for k, v in cov["kinds"].items()}, "coverageMissing": cov["missing"][:8]} if cov else {}),
                 "failure": failure["tag"] if failure else None, "willPolish": polishable, "judgeTier": judge_tier, "prompt": verdict["promptId"], "coreRecall": verdict["coreRecall"],
                 **({"missingCore": verdict["missingCore"][:6]} if verdict["missingCore"] else {}), **({"missing": verdict["missing"][:6]} if verdict["missing"] else {}),
-                **({"unsupported": verdict["unsupported"][:6]} if verdict["unsupported"] else {})}
+                **({"unsupported": verdict["unsupported"][:6]} if verdict["unsupported"] else {}),
+                **({"scopedJudge": True, "changedSections": scope["changedIds"][:12]} if scope else {}),
+                **({"carriedOverUnsupported": verdict["carriedOverUnsupported"][:6]} if verdict.get("carriedOverUnsupported") else {}),
+                **({"noImprovement": no_converge} if no_converge else {})}
         if polishable:
             return {"note": note, "update": {"verdict": verdict, "failure": failure}}
         attempt = {"n": s["iter"], "widened": s["widened"], "topK": t["topKWidened"] if s["widened"] else t["topK"], **scores, "failure": failure["tag"] if failure else None}
         return {"note": note, "update": {"verdict": verdict, "failure": failure, "attempts": [attempt], "feedback": failure["feedback"] if failure else [],
-                                         "accepted": None if failure else {"draft": s["draft"], "verdict": verdict}}}
+                                         "noConverge": no_converge, "accepted": None if failure else {"draft": s["draft"], "verdict": verdict}}}
 
     def n_polish_draft(s):
         draft = W.polish_only(llm, draft=s["draft"], policy=policy, style=style, instructions=instructions, tier=s["tier"])
@@ -556,9 +588,12 @@ def process_change(change: dict, deps) -> dict:
 
     def n_fallback(s):
         # Cross-repo blocks arrive with a decision already built; judge exhaustion builds it here.
+        nc = s.get("noConverge")
         d = s.get("decision") or finish(s, {
             "outcome": "fallback", "reviewerAction": "auto_rejected", "rootCauseTag": "iteration_cap_exceeded",
-            "reason": f"reflection loop did not converge in {len(s['attempts'])} attempt(s); last check: {(s.get('failure') or {}).get('tag')}",
+            "reason": (f"reflection loop did not converge: no improvement (best recall {nc['bestRecall']} vs {nc['firstRecall']} on attempt 1, needed +{nc['minImprovement']}; "
+                       f"stopped after {len(s['attempts'])} attempt(s), {nc['attemptsAvoided']} attempt(s) avoided); last check: {(s.get('failure') or {}).get('tag')}") if nc
+                      else f"reflection loop did not converge in {len(s['attempts'])} attempt(s); last check: {(s.get('failure') or {}).get('tag')}",
             "draft": s.get("draft"), "feedback": (s.get("failure") or {}).get("feedback")})
         ticket = deps["escalate"](d) if deps.get("escalate") else None
         return {"status": "fallback", "note": {"rootCauseTag": d.get("rootCauseTag"), "ticket": ticket}, "update": {"decision": {**d, "ticket": ticket}}}
@@ -567,6 +602,8 @@ def process_change(change: dict, deps) -> dict:
     def after_judge(s):
         if s.get("accepted"):
             return "publish"
+        if s.get("noConverge"):
+            return "fallback"
         if s.get("failure") and s["failure"]["tag"] in GROUNDED_ONLY_TAGS and not s["polished"] and not s.get("patch"):
             return "polish_draft"
         cap = t["maxIterations"] * 2 if s["widened"] else t["maxIterations"]
