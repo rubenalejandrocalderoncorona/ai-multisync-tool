@@ -2,7 +2,7 @@
 # One image for both, so there is a single thing to build and import into the cluster.
 FROM python:3.12-alpine
 # git, gh and jq: the on-demand Job clones the repos and opens the review PR itself (scripts/job-entrypoint.sh).
-RUN apk add --no-cache bash git jq github-cli \
+RUN apk add --no-cache bash git jq github-cli openssl \
  && adduser -D -u 1000 app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app
 WORKDIR /app
