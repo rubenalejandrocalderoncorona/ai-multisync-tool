@@ -122,6 +122,19 @@ def fallback_html(d: dict) -> str:
     return "".join(p for p in parts if p)
 
 
+def eval_flag_html(f: dict, threshold) -> str:
+    link = f.get("pr")
+    parts = [
+        f"<p>The nightly draft evaluation scored a draft <strong>{f2(f.get('score'))}</strong> (below {esc(threshold)}): <code>{esc(f.get('label'))}</code>.</p>",
+        f"<p><strong>Repo:</strong> {esc(f.get('repo'))}<br><strong>Page:</strong> <code>{esc(f.get('page'))}</code><br><strong>Change unit:</strong> <code>{esc(f.get('change_unit_id'))}</code>"
+        f"<br><strong>Attempt:</strong> {esc(f.get('attempt'))}<br><strong>Phoenix span:</strong> <code>{esc(f.get('span_id'))}</code></p>",
+        link and f'<p><strong>Link:</strong> <a href="{esc(link)}">{esc(link)}</a></p>',
+        f.get("explanation") and f"<p><strong>Judge:</strong> {esc(f['explanation'])}</p>",
+        "<p>Check the page against the code before approving it. Detection only: nothing was changed or blocked.</p>",
+    ]
+    return "".join(p for p in parts if p)
+
+
 def review_html(repo: str, commit: str, pr_url: str, items: list[dict] | None = None, environment: str = "QA") -> str:
     rows = "".join(
         f"<tr><td><code>{esc(i.get('path'))}</code></td><td>{f2(i.get('precision'))}</td><td>{f2(i.get('recall'))}</td><td>{f2(i.get('style'))}</td><td>{f2(i.get('quality'))}</td></tr>"
@@ -173,6 +186,14 @@ class Tickets:
         r = self._open_or_note(title, review_html(repo, commit, pr_url, items, environment), 2,
                                f'<p>Pull request updated: <a href="{esc(pr_url)}">{esc(pr_url)}</a></p>')
         return {**r, "ref": f"desk:{r['id']}"}
+
+    def open_eval_flag(self, f: dict, threshold) -> str | None:
+        """A draft the nightly evaluator scored below the threshold. Returns the ticket URL; a repeat for the same change unit adds a note."""
+        if not self.backend:
+            return None
+        title = f"[docs-eval] {f.get('repo')}@{str(f.get('commit'))[:7]} {f.get('page')}"
+        r = self._open_or_note(title, eval_flag_html(f, threshold), 2, f"<p>Scored again: {f2(f.get('score'))} (below {esc(threshold)}).</p>")
+        return r["url"]
 
     def open_audit(self, audit_id: int, repo: str, commit: str, page: str) -> str | None:
         """A second-pass audit request. By design it names neither the original reviewer nor the review outcome, and does not link the pull request, so the

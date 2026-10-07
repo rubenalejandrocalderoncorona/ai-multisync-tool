@@ -31,8 +31,10 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: requirements-dev.txt
-      - run: pip install -r requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-evals.txt
+      - run: pip install -r requirements-dev.txt -r requirements-evals.txt   # the evals stack is for tests/test_draft_evals.py; the runtime image does not carry it
       - run: python -m pytest tests --ignore=tests/integration
 
   integration:
@@ -114,10 +116,21 @@ jobs:
           tags: ai-multysinc-pipeline:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build the evals image (pipeline image + Phoenix evaluator stack)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: evals
+          load: true
+          tags: ai-multysinc-pipeline:ci-evals
+          cache-from: type=gha
       - name: Smoke test the image
         run: |
           docker run --rm ai-multysinc-pipeline:ci python -c "import multisync.pipeline, multisync.context, multisync.webhook; print('image loads the pipeline and the webhook')"
           docker run --rm -e VECTOR_DRIVER=memory -e FACTSTORE_DRIVER=memory ai-multysinc-pipeline:ci python -m multisync.cli.doctor --env-only || true
+          docker run --rm ai-multysinc-pipeline:ci python -c "import importlib.util as u; assert u.find_spec('phoenix') is None, 'the runtime image must not carry the evals stack'"
+          docker run --rm ai-multysinc-pipeline:ci-evals python -c "import multisync.evals.run_draft_evals, phoenix.evals, phoenix.client; print('evals image loads the draft evaluator')"
           docker run --rm ai-multysinc-pipeline:ci sh -c 'test -f prompts/judge-code.md && test -f config/doc-styles.json && test -f infra/postgres/init.sql'
 
   publish:
@@ -164,3 +177,23 @@ jobs:
           subject-name: ghcr.io/${{ github.repository_owner }}/ai-multysinc-pipeline
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+      # The nightly draft-evals CronJob (infra/k8s/draft-evals-cronjob.yaml) runs <pipeline image>-evals: same tag, evals target.
+      - id: meta_evals
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ai-multysinc-pipeline
+          flavor: suffix=-evals,onlatest=false
+          tags: |
+            type=sha,format=short
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: evals
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta_evals.outputs.tags }}
+          labels: ${{ steps.meta_evals.outputs.labels }}
+          cache-from: type=gha

@@ -1,0 +1,3 @@
+arize-phoenix-client==3.5.0
+arize-phoenix-evals==3.9.0
+pandas>=2.2

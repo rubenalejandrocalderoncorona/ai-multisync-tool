@@ -1,0 +1,44 @@
+# Nightly draft evaluation: scores the "draft" spans of the last 24h in Phoenix for hallucination (docs/DRAFT-EVALS.md) and attaches the scores to those spans.
+# It never runs inside, or waits for, a generation run: it only READS spans from Phoenix and WRITES evaluations back to it. No FactStore, no Qdrant, no repo access.
+# Image: the `evals` target of the Dockerfile, published next to the pipeline image with the suffix -evals (the same tag, so __PIPELINE_IMAGE__ stays the one placeholder).
+# Reads multisync-config (PHOENIX_COLLECTOR_ENDPOINT, PHOENIX_PROJECT_NAME, AI_CHEAP_MODEL) and, from multisync-secrets, DEEPSEEK_API_KEY (the judge) and PHOENIX_API_KEY.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: multisync-draft-evals
+  namespace: multirepo
+spec:
+  schedule: "30 2 * * *"            # 02:30 every day, after the day's runs; the window is the 24h before it
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 172800
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: draft-evals
+              image: __PIPELINE_IMAGE__-evals
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "multisync.evals.run_draft_evals", "--hours", "24", "--max-spans", "500"]
+              envFrom:
+                - configMapRef: { name: multisync-config }
+              env:
+                - name: DEEPSEEK_API_KEY
+                  valueFrom: { secretKeyRef: { name: multisync-secrets, key: DEEPSEEK_API_KEY } }
+                - name: PHOENIX_API_KEY
+                  valueFrom: { secretKeyRef: { name: multisync-secrets, key: PHOENIX_API_KEY } }
+              resources:
+                requests: { cpu: 50m, memory: 192Mi }
+                limits: { memory: 512Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 1000
+                capabilities: { drop: ["ALL"] }

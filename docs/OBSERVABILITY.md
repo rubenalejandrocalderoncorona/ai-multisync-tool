@@ -1,6 +1,6 @@
 # Seeing what the pipeline did
 
-Three levels, from the one that always exists to the one you opt into.
+Three levels, from the one that always exists to the one you opt into. On top of level 2, a nightly job scores every draft for hallucination (see below).
 
 ## 1. The FactStore: central, durable, free (always on)
 
@@ -43,6 +43,12 @@ is made under Settings, System keys.
 **Setup from scratch.** Create `phoenix-secrets` (the header of `phoenix.yaml` has the command), `CREATE SCHEMA phoenix` in the FactStore
 database, apply `phoenix.yaml`, log in, create a system key, put it in `multisync-secrets` as `PHOENIX_API_KEY`. The traces contain prompts and
 code excerpts, so keep the login strong.
+
+### Draft scores (nightly evaluator)
+
+Each attempt of `write_draft` also emits a `draft` span (the fact sheet and doc plan in, the draft out, the retrieved chunks as `retrieval.documents`). A nightly
+CronJob scores those spans for hallucination with the cheap-tier model and attaches a `draft_faithfulness` evaluation to each one; `multisync evals
+flag-low-scores` lists the low ones for a human. It runs apart from generation and only reads and annotates in Phoenix. See [DRAFT-EVALS.md](DRAFT-EVALS.md).
 
 ## 3. Raw logs
 

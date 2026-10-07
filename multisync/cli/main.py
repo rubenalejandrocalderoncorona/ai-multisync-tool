@@ -1,4 +1,4 @@
-"""`multisync <group> <command>`: one entry point over the commands. `multisync metrics review-readiness|audit-gap ...` and `multisync audit list|show|submit`.
+"""`multisync <group> <command>`: one entry point over the commands. `multisync metrics review-readiness|audit-gap ...`, `multisync audit list|show|submit` and `multisync evals flag-low-scores`.
 The other tools stay available as `python -m multisync.cli.<name>`."""
 from __future__ import annotations
 
@@ -15,7 +15,11 @@ def main(argv: list[str] | None = None) -> int:
         from .audit import main as audit_main
 
         return audit_main(argv[1:])
-    print("usage: multisync metrics review-readiness|audit-gap --segment <internal|public_interface>:<cheap|expensive> [...]\n       multisync audit list|show <id>|submit <id> --reviewer <login> --accurate yes|no", file=sys.stderr)
+    if argv and argv[0] == "evals":
+        from .evals import main as evals_main
+
+        return evals_main(argv[1:])
+    print("usage: multisync metrics review-readiness|audit-gap --segment <internal|public_interface>:<cheap|expensive> [...]\n       multisync audit list|show <id>|submit <id> --reviewer <login> --accurate yes|no\n       multisync evals flag-low-scores [--threshold 0.7] [--hours 24] [--ticket]", file=sys.stderr)
     return 2
 
 
