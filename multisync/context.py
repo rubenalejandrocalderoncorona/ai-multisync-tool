@@ -108,7 +108,7 @@ def sync_context(*, repo, commit, git, code_store, doc_store, llm, facts, before
             continue
         if incremental:
             code_store.delete_by_path(repo, f)
-        for sy in extract_public_symbols(f, raw):
+        for sy in extract_public_symbols(f, raw, calls=True):
             symbol_rows.append({"path": f, "kind": sy["kind"], "name": sy["name"], "sig_hash": sig_hash(sy["sig"])})
         for i, c in enumerate(chunk_code(f, scrub(raw))):
             if len(code_points) >= max_chunks:
@@ -201,7 +201,7 @@ def backfill_coupling(*, repo, commit, git, facts, scope=None, exclude=None, doc
         raw = git.read_at(commit, f)
         if _binary_or_big(raw):
             continue
-        for sy in extract_public_symbols(f, raw):
+        for sy in extract_public_symbols(f, raw, calls=True):
             rows.append({"path": f, "kind": sy["kind"], "name": sy["name"], "sig_hash": sig_hash(sy["sig"])})
     facts.replace_symbols(repo, rows)
     known = facts.known_symbol_names()

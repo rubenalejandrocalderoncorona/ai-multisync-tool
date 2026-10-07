@@ -22,6 +22,7 @@ flowchart TD
 | What | Where |
 |---|---|
 | Entry with `serviceName`, `targetPath`, `mode`, `trust`, `pages[]` (`path`, `kind`, `brief`, `scope`), `exclude`, optional `allowSensitive` | `config/repos.json` in the central repo, read from the **`qa`** branch |
+| Link repos that share an API: `linkedRepos: ["owner/repo"]` (and optional `contract.role`, `crossRepoGate`) on ONE side of the pair | `config/repos.json`; see `docs/ONBOARD-A-REPO.md` |
 | Repo allowed to start Jobs | `ALLOWED_REPOS` in `infra/k8s/webhook.yaml`, applied to the cluster |
 | Push webhook to `https://rubenalejandrocalderoncorona.org/api/sync-webhook` (JSON, shared secret `multisync-webhook`) | Source repo settings |
 
@@ -48,7 +49,7 @@ flowchart TD
 | # | Node | What it does | Ends the page with |
 |---|---|---|---|
 | 1 | prefilter | Diff smaller than 3 lines is not worth a draft unless forced. A removed source produces a delete decision. | `skipped` |
-| 2 | cross_repo | If the change mentions a symbol of the cross-repo registry, every repo owning that feature must have it. | `fallback: cross_repo_incomplete` |
+| 2 | cross_repo | Two kinds of contract point. Manual: the change mentions a symbol of the cross-repo registry, every repo owning that feature must have it. Automatic (`linkedRepos`): a route the change added or modified that a linked repo calls (`client_call` symbol, matched on the normalised path) needs that repo to have an approved document mentioning its call. Nobody calls the route: nothing to wait for. Provider side only; `crossRepoGate` off/warn/block (env `CROSS_REPO_GATE` wins). | `fallback: cross_repo_incomplete` |
 | 3 | route | Free, no model: classify `internal` vs `public_interface` (changed public symbol, route, config key, registry hit, or symbol other docs mention) and pick the tier: cheap or expensive. | |
 | 4 | similarity | Embed a hypothetical paragraph of what the docs would say, compare to the approved page. Similarity at least 0.92 means the page already says it. | `refreshed` (page re-keyed, no PR) |
 | 5 | code_context, gar, semantic_context | Retrieve code and doc chunks (top 12 code chunks, 30 000 char budget, drop cosine below 0.45), generate the hypothetical answer, add related pages. | |

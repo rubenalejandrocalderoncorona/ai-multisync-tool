@@ -16,10 +16,10 @@ from __future__ import annotations
 from .symbols import diff_public_symbols
 
 
-def route_change(change: dict, registry: dict | None = None, facts=None, force: str = "auto") -> dict:
+def route_change(change: dict, registry: dict | None = None, facts=None, force: str = "auto", linked: list | None = None) -> dict:
     """{tier: 'cheap'|'expensive', reasons, signals, classification: 'internal'|'public_interface'}"""
     registry = registry or {}
-    signals = {"publicChanged": [], "total": 0, "registry": [], "referencedBy": 0}
+    signals = {"publicChanged": [], "total": 0, "registry": [], "referencedBy": 0, "linked": []}
     reasons: list[str] = []
 
     is_code = change.get("kind") == "code"
@@ -29,6 +29,12 @@ def route_change(change: dict, registry: dict | None = None, facts=None, force: 
     signals["registry"] = [sym for sym in registry if sym in after]
     if signals["registry"]:
         reasons.append(f"cross-repo contract point: {', '.join(signals['registry'][:4])}")
+
+    # 1b. Linked repos: a route this change touches that a linked repo calls is a contract point, like a registry hit.
+    if linked:
+        signals["linked"] = [p["route"] for p in linked]
+        repos = list(dict.fromkeys(r for p in linked for r in p.get("consumers") or []))
+        reasons.append(f"cross-repo contract point (linked: {', '.join(repos)})")
 
     if is_code:
         # 2. The public interface, before vs after.

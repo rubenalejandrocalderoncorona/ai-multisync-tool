@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .contracts import routes_match
+
 INIT_SQL = Path(__file__).resolve().parent.parent / "infra" / "postgres" / "init.sql"
 
 
@@ -90,7 +92,15 @@ class PgFactStore:
                     (repo, [r["path"] for r in b], [r["kind"] for r in b], [r["name"] for r in b], [r.get("sig_hash") or "" for r in b]))
 
     def known_symbol_names(self) -> set[str]:
-        return {r["name"] for r in self._q("SELECT DISTINCT name FROM symbols")}
+        # client_call names are API paths a repo requests, not identifiers a document can reference
+        return {r["name"] for r in self._q("SELECT DISTINCT name FROM symbols WHERE kind <> 'client_call'")}
+
+    def linked_clients(self, repos, route) -> list[dict]:
+        """client_call symbols of `repos` whose path matches the provider `route` (see contracts.routes_match): [{repo, path, name}]."""
+        if not repos:
+            return []
+        rows = self._q("SELECT repo, path, name FROM symbols WHERE kind='client_call' AND repo = ANY(%s) ORDER BY repo, path, name", (list(repos),))
+        return [r for r in rows if routes_match(route, r["name"])]
 
     def replace_doc_refs(self, doc_repo, doc_path, symbols, kind) -> None:
         self._q("DELETE FROM doc_refs WHERE doc_repo=%s AND doc_path=%s", (doc_repo, doc_path))
@@ -366,7 +376,11 @@ class MemoryFactStore:
             if not any(x["repo"] == repo and x["path"] == r["path"] and x["kind"] == r["kind"] and x["name"] == r["name"] for x in self.symbols):
                 self.symbols.append({"repo": repo, **r})
 
-    def known_symbol_names(self): return {r["name"] for r in self.symbols}
+    def known_symbol_names(self): return {r["name"] for r in self.symbols if r["kind"] != "client_call"}
+
+    def linked_clients(self, repos, route):
+        return [{"repo": r["repo"], "path": r["path"], "name": r["name"]} for r in self.symbols
+                if r["kind"] == "client_call" and r["repo"] in (repos or []) and routes_match(route, r["name"])]
 
     def replace_doc_refs(self, doc_repo, doc_path, symbols, kind):
         self.refs = [r for r in self.refs if not (r["doc_repo"] == doc_repo and r["doc_path"] == doc_path)]

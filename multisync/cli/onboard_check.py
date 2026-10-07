@@ -16,6 +16,7 @@ from .. import gitutil as G
 from ..chunker import chunk_code, chunk_markdown
 from ..codesource import matches_any, pages_scope, scrub, select_files, snapshot
 from ..config import load_config, read_json, repo_policy
+from ..contracts import validate_links
 from ..context import DOC_FILE
 from ..coverage import check_coverage
 from ..prompts import load_styles, resolve_style
@@ -29,10 +30,13 @@ SENSITIVE_PATH = re.compile(r"(^|/)(\.env(\..+)?$|[^/]*\.(pem|key|p12|pfx|keysto
 EMBED_USD_PER_MTOK = 0.02  # text-embedding-3-small
 
 
-def plan_onboarding(repo: str, policy, git, commit: str, styles: dict | None = None) -> dict:
-    """git: object with list_files(rev) and read_at(rev, file)."""
+def plan_onboarding(repo: str, policy, git, commit: str, styles: dict | None = None, repos_config=None) -> dict:
+    """git: object with list_files(rev) and read_at(rev, file). repos_config (optional): the whole repos.json, to validate linkedRepos."""
     styles = styles or {"styles": {}}
     warnings: list[str] = []
+    if repos_config is not None:
+        # problems of this repo's own entry, plus links other repos declare towards it
+        warnings.extend(w for w in validate_links(repos_config) if w.startswith(f"{repo}:") or f"{repo} <->" in w or f"<-> {repo}:" in w)
     blockers: list[str] = []
     all_files = git.list_files(commit)
     exclude = policy.get("exclude") or []
@@ -145,7 +149,7 @@ def main(argv: list[str]) -> int:
     if repo not in (repos_config.get("repos") or {}):
         print(f"✘ {repo} has no entry in {cfg['paths']['reposConfig']}. Add one first (see examples/calendarscheduler/repos.entry.json).", file=sys.stderr)
         return 1
-    result = plan_onboarding(repo, repo_policy(repos_config, repo), G.accessors(directory), arg_value(argv, "ref") or G.head(directory), load_styles(cfg["paths"]["styles"]))
+    result = plan_onboarding(repo, repo_policy(repos_config, repo), G.accessors(directory), arg_value(argv, "ref") or G.head(directory), load_styles(cfg["paths"]["styles"]), repos_config)
     print_plan(result)
     return 1 if result["blockers"] else 0
 
