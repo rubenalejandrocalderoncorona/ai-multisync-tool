@@ -88,6 +88,33 @@ Two choices to know about:
   that the report says how many more are needed instead of raising an alarm.
 
 
+# Graduation alert and drift alert
+
+Two **alerts**, nothing more. Both are sent by `record_review` (when a docs PR is closed) and the drift one also by `multisync audit submit`. They are
+remembered in the table `segment_alerts` (`kind` graduation|drift, segment, `policy_version`, `payload`; unique per kind, segment and policy version), so each fires
+**once**: the marker is inserted first (`ON CONFLICT DO NOTHING`) and only the writer whose insert happened notifies, so a redelivered webhook or two Jobs
+at once cannot double-send. A failing Slack or ticket is logged and does not remove the marker. Nothing here can fail the Job.
+
+**Graduation alert.** For each segment (`diff_classification:model_tier_used`) and policy version of the rows just recorded: `n >= REVIEW_READINESS_MIN_SAMPLES`
+(30) and Wilson lower bound `>= REVIEW_READINESS_THRESHOLD` (0.85), the same `readiness` as `metrics review-readiness`. Sent to Slack (`SLACK_WEBHOOK_URL`) and as
+one INFORMATIONAL cAImanDesk ticket (`[docs-info] Segment graduation: ...`, lowest priority) with the counts, interval, thresholds, policy version, first
+and last `reviewed_at`, reviewers and the PR links. The text says a human *may consider* enabling auto-approval; nothing is enabled.
+Demo/synthetic data never pages anyone: segments with a `demo-` policy version or a `synthetic://` PR URL are skipped unless `GRADUATION_ALERT_SYNTHETIC=1`.
+
+**Audit spot-check.** The sampling draw uses the operating system's CSPRNG (`secrets.SystemRandom`). When a draft is newly sampled, the PR gets one comment
+(once per PR): "Audit Spot-Check, N% Quality Sample, a second reviewer must confirm this page against the code" (N from `AUDIT_SAMPLE_RATE`), and Slack gets a line
+only if a webhook is configured. Edited and rejected drafts are never sampled.
+
+**Drift alert.** After a verdict is submitted, and after `record_review` writes rows, if the segment has at least `AUDIT_MIN_SAMPLES` (5) audits with a verdict
+and the audited accuracy (confirmed accurate / audited, `pct_confirmed_accurate` of `audit_gap`) is **below `AUDIT_ACCURACY_ALERT` (0.80)**, one Slack alert
+"Drift Alert" is sent that recommends suspending any auto-approval for the segment until a human re-validates. It relates to the audit-gap warning as follows:
+the gap warning compares audited accuracy with the *raw no-edit rate* in percentage points (`AUDIT_MAX_GAP_PP`, default 10), so it flags rubber-stamping even when
+accuracy is still high; the drift alert looks at the audited accuracy *alone* against an absolute floor. Same inputs, same minimum number of audits, two views.
+
+**What is NOT automated.** No approval, merge or pass is ever decided by these alerts. The approval flag column is never read or written by them (a test
+enforces this in the new code), nothing is enabled when a segment graduates, nothing is suspended when drift fires, and the CLI stays read-only. A human reads
+the alert and decides. If no Slack webhook or ticketing is configured, the marker is still written and the alert is only logged.
+
 # Replaced drafts
 
 A repository that changes often (this tool is one) would otherwise pile up one open review pull request per push. When a sync opens a new review

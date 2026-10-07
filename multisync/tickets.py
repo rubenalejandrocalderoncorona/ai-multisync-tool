@@ -195,6 +195,14 @@ class Tickets:
         r = self._open_or_note(title, eval_flag_html(f, threshold), 2, f"<p>Scored again: {f2(f.get('score'))} (below {esc(threshold)}).</p>")
         return r["url"]
 
+    def open_info(self, title: str, body_html: str) -> str | None:
+        """An INFORMATIONAL ticket (for example a segment graduation alert): nobody must act, nothing was changed. Lowest priority; a repeat of the same
+        title adds a note instead of a second ticket. Returns the ticket URL."""
+        if not self.backend:
+            return None
+        r = self._open_or_note(title, body_html, 1, "<p>Informational: raised again.</p>")
+        return r["url"]
+
     def open_audit(self, audit_id: int, repo: str, commit: str, page: str) -> str | None:
         """A second-pass audit request. By design it names neither the original reviewer nor the review outcome, and does not link the pull request, so the
         auditor judges the page against the code rather than against the first reviewer's verdict. Returns the ticket URL."""

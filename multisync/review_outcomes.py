@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import base64
 import os
-import random
 import re
 from datetime import datetime, timezone
 
@@ -178,16 +177,19 @@ def audit_sample_rate(env=None) -> float:
 
 
 def record(facts, gh, number: int, pr_url: str, reviewed_by: str | None, reviewed_at: str | None, merged: bool,
-           audit_rate: float | None = None, rng=random.random, on_sampled=None) -> dict:
+           audit_rate: float | None = None, rng=None, on_sampled=None) -> dict:
     """Log the outcome of one closed PR; then sample each newly logged `draft_with_noedition` row for a second-pass audit with probability
     `audit_rate`. `on_sampled(audit_id, row)` lets the caller open a ticket. Sampling is detection only: it changes nothing about the review."""
+    from .segment_alerts import secure_random  # imported here: segment_alerts imports this module
+    rng = rng or secure_random  # the draw is cryptographically secure by default; tests inject their own
     rows, skipped = collect_rows(facts, gh, number, pr_url, reviewed_by, reviewed_at, merged)
     rate = audit_sample_rate() if audit_rate is None else audit_rate
-    inserted, sampled = 0, []
+    inserted, sampled, written = 0, [], []
     for r in rows:
         if not facts.record_review_outcome(r):
             continue
         inserted += 1
+        written.append(r)
         if r["outcome"] == "draft_with_noedition" and rng() < rate:
             audit_id = facts.sample_for_audit(r["pr_url"], r["change_unit_id"])
             if audit_id is not None:
@@ -198,7 +200,7 @@ def record(facts, gh, number: int, pr_url: str, reviewed_by: str | None, reviewe
                     except Exception as e:  # noqa: BLE001 - the queue is the table; a ticket that fails to open must not undo the sampling
                         skipped.append(f"audit {audit_id}: ticket not opened ({e})")
     return {"rows": len(rows), "inserted": inserted, "duplicates": len(rows) - inserted, "skipped": skipped, "outcomes": [r["outcome"] for r in rows], "audit_sampled": sampled,
-            "audit_rate": rate}
+            "audit_rate": rate, "written": written}
 
 
 # ── readiness ────────────────────────────────────────────────────────────────────

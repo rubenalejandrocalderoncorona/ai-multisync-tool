@@ -9,7 +9,8 @@ import json
 import os
 import sys
 
-from ..review_outcomes import GitHub, record
+from ..review_outcomes import GitHub, audit_sample_rate, record
+from ..segment_alerts import Notifier, run_after_record, sampled_handler
 from ..tickets import create_tickets
 from ..wiring import build_deps
 
@@ -23,14 +24,11 @@ def main() -> int:
         d["facts"].migrate()
         tickets = create_tickets(d["cfg"]["alerts"])
 
-        def open_ticket(audit_id, row):  # the audit queue is the table; the ticket is how the second reviewer hears about it
-            repo, _, rest = row["change_unit_id"].partition("@")
-            commit, _, page = rest.partition(":")
-            url = tickets.open_audit(audit_id, repo, commit, page)
-            if url:
-                print(f"audit {audit_id} requested: {url}")
-
-        result = record(d["facts"], gh, number, env["PR_URL"], env.get("REVIEWED_BY") or None, env.get("REVIEWED_AT") or None, env.get("PR_MERGED") == "true", on_sampled=open_ticket)
+        notifier = Notifier(d["cfg"]["alerts"], tickets)
+        on_sampled = sampled_handler(gh, number, audit_sample_rate(), tickets, notifier)  # audit ticket + one PR comment (+ Slack when configured)
+        result = record(d["facts"], gh, number, env["PR_URL"], env.get("REVIEWED_BY") or None, env.get("REVIEWED_AT") or None, env.get("PR_MERGED") == "true", on_sampled=on_sampled)
+        written = result.pop("written", [])
+        result["alerts"] = run_after_record(d["facts"], written, notifier)  # alerting only; swallows its own failures
         print(json.dumps(result))
         d["facts"].close()
     except Exception as e:  # noqa: BLE001 - logging must never fail the job that carries it

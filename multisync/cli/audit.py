@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from ..segment_alerts import Notifier, check_drift
+from ..tickets import create_tickets
 from ..wiring import build_deps
 
 
@@ -21,7 +23,7 @@ def split(change_unit_id: str) -> tuple[str, str, str]:
     return repo, commit, page
 
 
-def run(argv: list[str], facts) -> tuple[int, str]:
+def run(argv: list[str], facts, notifier: Notifier | None = None) -> tuple[int, str]:
     ap = argparse.ArgumentParser(prog="multisync audit")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
@@ -52,13 +54,16 @@ def run(argv: list[str], facts) -> tuple[int, str]:
         facts.submit_audit(a.id, a.reviewer, a.accurate == "yes", a.notes)
     except ValueError as e:
         return 1, f"refused: {e}"
+    item = facts.audit_item(a.id)  # a verdict may tip the segment's audited accuracy below the alert level: tell a human once (alerting only)
+    if item:
+        check_drift(facts, item["diff_classification"], item["model_tier_used"], item["policy_version"], notifier or Notifier(None))
     return 0, f"audit #{a.id} recorded: {'accurate' if a.accurate == 'yes' else 'NOT accurate'}"
 
 
 def main(argv: list[str] | None = None) -> int:
     d = build_deps()
     try:
-        code, text = run(argv if argv is not None else sys.argv[1:], d["facts"])
+        code, text = run(argv if argv is not None else sys.argv[1:], d["facts"], Notifier(d["cfg"]["alerts"], create_tickets(d["cfg"]["alerts"])))
     except SystemExit as e:
         return int(e.code or 0) if isinstance(e.code, int) else 2
     finally:
