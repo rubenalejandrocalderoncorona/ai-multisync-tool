@@ -6,6 +6,7 @@ You receive:
 - WHAT_CHANGED: the changed files, the changed public symbols and a diff of the source before and after. It tells you which facts moved.
 - SECTIONS: the existing page, split by headings. Each block starts with `=== SECTION <id> ===`. The id is the heading path; use it exactly as written.
 - FACT_SHEET, PLAN, CODE, RELATED_CODE as in a normal draft.
+- If REVIEWER_REQUEST replaces the source diff in WHAT_CHANGED, a reviewer asked for those changes to the page: change only the sections they concern, leave everything else byte-identical (CODE stays the ground truth for any fact). A request about the whole page (restructure, rewrite the intro) may touch many sections.
 
 Rules:
 - Change only sections whose facts are contradicted or missing because of this change. Leave every other section out of the list: it is kept byte for byte, so repeating it only adds risk.

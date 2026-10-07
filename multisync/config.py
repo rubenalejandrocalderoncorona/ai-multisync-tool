@@ -115,6 +115,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AttrDict:
             "patchMaxChangedSectionShare": _num(g("PATCH_MAX_CHANGED_SECTION_SHARE"), 0.5),  # patch_too_broad above this share of sections ...
             "patchSmallChangeLines": _num(g("PATCH_SMALL_CHANGE_LINES"), 20),  # ... when the source diff is at most this many lines
             "patchGuardMinSections": _num(g("PATCH_GUARD_MIN_SECTIONS"), 4),  # pages with fewer sections are not guarded
+            "patchDocsMode": _num(g("PATCH_DOCS_MODE"), 1),  # 0: an edited source doc is redrafted whole again (docs mode)
+            "patchRevisions": _num(g("PATCH_REVISIONS"), 1),  # 0: the revise Job redrafts the whole page again
+            "revisePatchMaxSectionShare": _num(g("REVISE_PATCH_MAX_SECTION_SHARE"), 1.0),  # drift guard share for revisions; 1.0 = guard off
             "contextMinScore": _num(g("CONTEXT_MIN_SCORE"), 0.45),  # retrieved chunks below this cosine score are dropped
         },
         # off | warn | block: the automatic linked-repos gate. Overrides a repo's own `crossRepoGate`; empty means "use the repo's, else block".

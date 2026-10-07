@@ -103,12 +103,13 @@ def draft_document(llm, *, mode="docs", file_path, source, existing="", changed_
 
 
 def patch_document(llm, *, sections, file_path=None, changed_files=None, changed_symbols=None, diff_text="", related_code="", fact_sheet="", plan="", source="",
-                   context=None, policy=None, style=None, instructions="", feedback=None, tier=None) -> dict:
-    """Section-patch drafting: the model returns operations on the existing sections, code assembles the page. Malformed JSON is retried once.
+                   context=None, policy=None, style=None, instructions="", feedback=None, tier=None, mode="code", reviewer_request="") -> dict:
+    """Section-patch drafting (mode "code": prompt patch-code, `source` is a code snapshot; mode "docs": prompt patch-docs, `source` is the edited
+    markdown document and `diff_text` its diff). `reviewer_request` (a revision after review) replaces the source diff as WHAT_CHANGED. The model returns operations on the existing sections, code assembles the page. Malformed JSON is retried once.
     Raises patching.PatchError when the reply cannot be used (still malformed, unknown section id, bad operation): the caller falls back to
     draft_document. Returns {text, promptId, operations, changed: {replaced, deleted, inserted}, unchangedReason}."""
     changed_files = changed_files or []
-    prompt = P.load_prompt("patch-code")
+    prompt = P.load_prompt("patch-docs" if mode == "docs" else "patch-code")
     system = "\n\n".join(p for p in [
         P.fill(prompt["text"], {"PERSONA": (style or {}).get("prompt") or "You are a senior technical writer."}),
         instructions and f"Documentation standards:\n{instructions}",
@@ -117,9 +118,18 @@ def patch_document(llm, *, sections, file_path=None, changed_files=None, changed
     ctx = "\n---\n".join(f"[{c['heading']}] {c['text'][:600]}" for c in (context or []))
     fix = "\n\nA reviewer rejected the previous attempt. Fix exactly these problems:\n- " + "\n- ".join(feedback) if feedback else ""
     blocks = "\n".join(f"=== SECTION {s['id']} ===\n{s['text'].rstrip(chr(10))}\n" for s in sections)
-    user = (f"WHAT_CHANGED:\nChanged files: {', '.join(changed_files) or '(unknown)'}\nChanged public symbols: {', '.join(changed_symbols or []) or '(none detected)'}\n"
-            f"Source diff (before -> after):\n{diff_text or '(not available)'}\n\nSECTIONS:\n{blocks}\nCONTEXT:\n{ctx or '(none)'}\n\n"
-            f"FACT_SHEET:\n{fact_sheet or '(none)'}\n\nPLAN:\n{plan or '(none)'}\n\nCODE:\n{source}\n\nRELATED_CODE:\n{related_code or '(none)'}{fix}")
+    if reviewer_request:
+        what = f"REVIEWER_REQUEST (a reviewer asked for these changes to the page; the source did not change):\n{reviewer_request}"
+    elif mode == "docs":
+        what = f"Source document: {file_path or '(unknown)'}\nDiff of the source document (before -> after):\n{diff_text or '(not available)'}"
+    else:
+        what = (f"Changed files: {', '.join(changed_files) or '(unknown)'}\nChanged public symbols: {', '.join(changed_symbols or []) or '(none detected)'}\n"
+                f"Source diff (before -> after):\n{diff_text or '(not available)'}")
+    if mode == "docs":
+        tail = f"SOURCE_DOCUMENT:\n{source}"
+    else:
+        tail = f"FACT_SHEET:\n{fact_sheet or '(none)'}\n\nPLAN:\n{plan or '(none)'}\n\nCODE:\n{source}\n\nRELATED_CODE:\n{related_code or '(none)'}"
+    user = f"WHAT_CHANGED:\n{what}\n\nSECTIONS:\n{blocks}\nCONTEXT:\n{ctx or '(none)'}\n\n{tail}{fix}"
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     try:
         r = llm.chat_json(messages, tier=tier)
