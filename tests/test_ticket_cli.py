@@ -38,14 +38,14 @@ def test_review_ticket_cli_open_marker_approve_closes_reject_leaves_open_missing
         code, out, _ = run(["qa"], tmp_path, {**base, "PR_URL": "https://github.com/o/docs/pull/9", "QA_URL": "https://example.org/documentation/qa/",
                                               "PR_BODY": f"x\n{o['marker']}\n<!-- multisync:ticket=desk:999 -->"})
         assert code == 0
-        assert "Deployed to QA" in t["comments"][-1]
+        assert "deployed to QA" in t["comments"][-1]
         assert "documentation/qa" in t["comments"][-1]
-        assert t["done"] is False
+        assert t["done"] is True, "merging into QA closes the ticket"
 
         code, out, _ = run(["approve"], tmp_path, {**base, "PR_URL": "https://github.com/o/docs/pull/9", "PR_BODY": f"intro\n{o['marker']}"})
         assert json.loads(out)["ok"] is True
         assert t["done"] is True
-        assert "Approved" in t["comments"][-1]
+        assert "Deployed to production" in t["comments"][-1]
 
         code, out, _ = run(["approve"], tmp_path, {**base, "PR_URL": "u", "PR_BODY": "no marker here"})
         assert code == 0

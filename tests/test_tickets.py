@@ -72,7 +72,7 @@ def test_rest_a_second_review_for_the_same_commit_adds_a_note_instead_of_a_dupli
 def test_rest_approve_notes_the_merge_and_closes_the_task_without_clobbering_other_columns():
     transport, calls, tasks = rest_desk([{"id": 5, "title": "x", "done": False, "priority": 2, "description": "keep me"}])
     assert create_tickets(REST_CFG, transport).approve({"id": 5}, "https://github.com/o/docs/pull/7") is True
-    assert any(c["url"].endswith("/tasks/5/comments") and "Approved" in c["body"]["comment"] for c in calls)
+    assert any(c["url"].endswith("/tasks/5/comments") and "Deployed to production" in c["body"]["comment"] for c in calls)
     assert tasks[5]["done"] is True
     assert tasks[5]["priority"] == 2
     assert tasks[5]["description"] == "keep me"
@@ -151,7 +151,7 @@ def test_mcp_review_opens_a_repeat_adds_a_real_comment_approve_comments_and_clos
 
         t.approve({"id": first["id"]}, "https://github.com/o/docs/pull/7")
         assert m.tasks[first["id"]]["done"] is True
-        assert "Approved for production" in m.comments[-1]["comment"]
+        assert "Deployed to production" in m.comments[-1]["comment"]
         # a closed task no longer blocks a new ticket for the same title
         assert t.open_review(**REVIEW)["id"] != first["id"]
     finally:
@@ -184,10 +184,17 @@ def test_ticket_refs_from_body_a_promotion_pr_carries_one_marker_per_batch_dupli
     assert ticket_refs_from_body("none") == []
 
 
-def test_qa_deploy_only_notes_the_ticket_production_approval_closes_it():
-    transport, _, tasks = rest_desk([{"id": 5, "title": "x", "done": False, "priority": 2}])
+def test_merging_into_qa_closes_the_ticket_and_the_production_promotion_only_adds_a_note():
+    transport, calls, tasks = rest_desk([{"id": 5, "title": "x", "done": False, "priority": 2}])
     t = create_tickets(REST_CFG, transport)
-    t.qa_deployed({"id": 5}, "https://github.com/o/docs/pull/7", "https://example.org/documentation/qa/")
-    assert tasks[5]["done"] is False
-    t.approve({"id": 5}, "https://github.com/o/docs/pull/8")
+    assert t.qa_deployed({"id": 5}, "https://github.com/o/docs/pull/7", "https://example.org/documentation/qa/") is True
+    assert tasks[5]["done"] is True  # approving means merging: closed at the QA merge
+    assert t.approve({"id": 5}, "https://github.com/o/docs/pull/8") is True  # promotion later: harmless on a closed ticket
     assert tasks[5]["done"] is True
+
+
+def test_a_ticket_closed_without_merging_stays_open():
+    transport, _, tasks = rest_desk([{"id": 6, "title": "y", "done": False, "priority": 2}])
+    t = create_tickets(REST_CFG, transport)
+    assert t.reject({"id": 6}, "https://github.com/o/docs/pull/9") is True
+    assert tasks[6]["done"] is False

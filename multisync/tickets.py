@@ -219,11 +219,19 @@ class Tickets:
         return r["url"]
 
     def qa_deployed(self, ref, pr_url=None, site_url=None) -> bool:
-        """The docs PR was merged into the QA branch: the page is live in QA, the ticket stays open until promotion."""
+        """The docs PR was merged into the QA branch. Approving means merging (the ticket text says so), so the ticket is noted and CLOSED here;
+        the later promotion to production only adds a note (see approve)."""
         if not self.backend:
             return False
         site = f' Review it at <a href="{esc(site_url)}">{esc(site_url)}</a>.' if site_url else ""
-        return self.backend.run(lambda b: (b.note({"id": ref["id"]}, f'<p><strong>Deployed to QA.</strong>{site} Pull request merged: <a href="{esc(pr_url)}">{esc(pr_url)}</a>. It goes to production when the promotion pull request is merged.</p>'), True)[1])
+
+        def go(b):
+            t = {"id": ref["id"]}
+            b.note(t, f'<p><strong>Approved and deployed to QA.</strong>{site} Pull request merged: <a href="{esc(pr_url)}">{esc(pr_url)}</a>. This ticket is now closed. '
+                      'It goes to production when the promotion pull request is merged.</p>')
+            b.set_done(t, True)
+            return True
+        return self.backend.run(go)
 
     def approve(self, ref, pr_url=None) -> bool:
         if not self.backend:
@@ -232,8 +240,8 @@ class Tickets:
         def go(b):
             t = {"id": ref["id"]}
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            b.note(t, f'<p><strong>Approved for production.</strong> Pull request merged: <a href="{esc(pr_url)}">{esc(pr_url)}</a> ({today}).</p>')
-            b.set_done(t, True)
+            b.note(t, f'<p><strong>Deployed to production.</strong> Promotion pull request merged: <a href="{esc(pr_url)}">{esc(pr_url)}</a> ({today}).</p>')
+            b.set_done(t, True)  # normally already closed when the review PR was merged into QA; this also closes a ticket that was reopened
             return True
         return self.backend.run(go)
 
