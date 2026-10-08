@@ -28,7 +28,7 @@ import uuid
 from .. import gitutil as G
 from .. import writer as W
 from ..cli.onboard_check import plan_onboarding
-from ..codesource import build_code_changes, pages_scope
+from ..codesource import build_code_changes, pages_scope, redact_sensitive_paths
 from ..config import repo_policy
 from ..context import sync_context, sync_site
 from ..fallback import escalate
@@ -111,13 +111,14 @@ def main() -> None:
     # The same free check as the onboarding dry run, enforced: a repository whose scope holds a file that looks sensitive (a secret-type path, a
     # "restricted" or "confidential" marker) is NOT sent to any model or embedded. Every page falls back with a ticket until the owner excludes the
     # file or acknowledges it with `allowSensitive` in config/repos.json.
-    blocked = None
+    blocked = blocked_public = None  # blocked names the files (Job log, decision store); blocked_public never does (ticket, Slack, anything public)
     if mode_setting in ("code", "both"):
         try:
             plan_ = plan_onboarding(repo, policy, G.accessors(source_dir), commit, styles)
             blocked = "; ".join(plan_["blockers"]) or None
+            blocked_public = "; ".join(plan_["blockersPublic"]) or None
         except Exception as e:  # noqa: BLE001 - a check that cannot run must not let the run send data it has not checked
-            blocked = f"the onboarding check could not run: {e}"
+            blocked = blocked_public = f"the onboarding check could not run: {redact_sensitive_paths(str(e))}"
         if blocked:
             print(f"onboarding blocked, nothing is embedded or sent to a model: {blocked}")
     if mode_setting in ("code", "both") and not blocked:
@@ -190,7 +191,7 @@ def main() -> None:
             continue
         try:
             if blocked and change["kind"] == "code":
-                raise OnboardingBlocked(blocked)
+                raise OnboardingBlocked(blocked_public)
             if context_error and change["kind"] == "code":
                 raise RuntimeError(f"context sync failed: {context_error}")
             decision = process_change(change, {
@@ -200,7 +201,8 @@ def main() -> None:
             })
         except Exception as e:  # noqa: BLE001 - infrastructure failure (AI/Qdrant/Postgres down): fail safe, never publish
             decision = {"runId": run_id, "repo": repo, "path": file, "commit": commit, "outcome": "fallback", "reviewerAction": "auto_rejected",
-                        "rootCauseTag": getattr(e, "tag", "pipeline_error"), "reason": str(e), "attempts": [], "metrics": {}, "action": "none", "trail": []}
+                        "rootCauseTag": getattr(e, "tag", "pipeline_error"), "reason": str(e), "attempts": [],
+                        "metrics": {"onboardingBlockers": blocked} if isinstance(e, OnboardingBlocked) else {}, "action": "none", "trail": []}
             decision["ticket"] = escalate(decision, cfg["alerts"])
 
         apply_decision(decision, d, repo, file, commit)
