@@ -147,37 +147,39 @@ def test_readonly_on_factstore_and_sql():
     assert len(q.sql) == 1 and q.sql[0].lstrip().upper().startswith("SELECT") and "auto_approval_eligible" not in q.sql[0]
 
 
-def test_a_rerun_where_phoenix_raises_on_duplicates_counts_them_instead_of_failing():
-    class Dup(Exception):
+def _client_raising(**counts):
+    class SpanCreationError(Exception):
         pass
 
-    Dup.__name__ = "SpanCreationError"
+    err = SpanCreationError(f"Found {counts.get('total_duplicates', 0)} duplicate spans:\n  - Span x")
+    for k, v in counts.items():
+        setattr(err, k, v)
 
     class Client:
         class spans:
             @staticmethod
             def log_spans(project_identifier, spans):
-                raise Dup(f"Found {len(spans)} duplicate spans:\n  - Span x")
+                raise err
 
-    assert pe._log_spans(Client, "p", [{"a": 1}, {"a": 2}]) == {"total_received": 2, "total_queued": 0, "total_duplicates": 2}
+    return Client, err
 
 
-def test_a_span_creation_error_that_is_not_all_duplicates_still_fails():
-    class Dup(Exception):
-        pass
+def test_a_run_with_some_new_and_some_existing_spans_counts_the_duplicates_instead_of_failing():
+    client, _ = _client_raising(total_received=3, total_queued=1, total_invalid=0, total_duplicates=2)
+    assert pe._log_spans(client, "p", [{"a": 1}, {"a": 2}, {"a": 3}]) == {"total_received": 3, "total_queued": 1, "total_duplicates": 2}
 
-    Dup.__name__ = "SpanCreationError"
 
-    class Client:
-        class spans:
-            @staticmethod
-            def log_spans(project_identifier, spans):
-                raise Dup("Found 1 duplicate spans:\n  - Span x")
+def test_a_rerun_with_only_existing_spans_is_a_normal_run():
+    client, _ = _client_raising(total_received=2, total_queued=0, total_invalid=0, total_duplicates=2)
+    assert pe._log_spans(client, "p", [{"a": 1}, {"a": 2}])["total_duplicates"] == 2
 
+
+def test_invalid_spans_still_fail_the_run():
     import pytest
 
-    with pytest.raises(Dup):
-        pe._log_spans(Client, "p", [{"a": 1}, {"a": 2}])
+    client, err = _client_raising(total_received=2, total_queued=0, total_invalid=1, total_duplicates=1)
+    with pytest.raises(type(err)):
+        pe._log_spans(client, "p", [{"a": 1}, {"a": 2}])
 
 
 def test_annotating_waits_for_phoenix_to_ingest_the_spans():
