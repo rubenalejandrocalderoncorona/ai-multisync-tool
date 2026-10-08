@@ -219,3 +219,15 @@ def test_dispatch_can_limit_and_force_pages():
     assert j["only_pages"] == [] and j["force_pages"] is False
     env = {x["name"]: x["value"] for x in job_manifest(cfg(), j, now=1)["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert "ONLY_PAGES" not in env and "FORCE_PAGES" not in env
+
+
+@pytest.mark.parametrize("msg", ["Revert x [skip docs-sync]", "tidy [SKIP DOCS]", "wip [no docs]", "fix [skip-docs-sync] now"])
+def test_a_skip_marker_in_the_head_commit_message_opts_the_push_out(msg):
+    j, why = plan(cfg(), "push", {**PUSH, "head_commit": {"message": msg}})
+    assert j is None and "skip" in why
+
+
+@pytest.mark.parametrize("msg", ["", "docs: skip nothing", "skip docs", "[skip ci]", "Revert the thing"])
+def test_without_the_marker_the_push_still_starts_a_sync(msg):
+    j, _ = plan(cfg(), "push", {**PUSH, "head_commit": {"message": msg}})
+    assert j and j["mode"] == "sync"

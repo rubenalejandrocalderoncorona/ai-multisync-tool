@@ -42,6 +42,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 PAGE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]{0,120}\.md$")  # a declared page path, e.g. buyer-flow.md
 FILE_RE = re.compile(r"^[A-Za-z0-9_@+=,. /-]+$")
 ZERO_RE = re.compile(r"^0+$")
+SKIP_RE = re.compile(r"\[(?:skip|no)[ -]docs?(?:[ -]sync)?\]", re.I)  # [skip docs-sync] [skip docs] [no docs] (case-insensitive)
 LOGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$")
 TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
 
@@ -125,6 +126,9 @@ def plan(cfg: Config, event: str, p: dict) -> tuple[dict | None, str]:
             return None, "branch deleted or invalid sha"
         if p.get("ref") != f"refs/heads/{repository.get('default_branch')}":
             return None, "not the default branch"
+        # Like `[skip ci]`: the head commit's message can opt a push out of the documentation sync (a revert of a test commit, a formatting-only change).
+        if SKIP_RE.search(str((p.get("head_commit") or {}).get("message") or "")):
+            return None, "head commit message asks to skip the documentation sync"
         files = [f for c in p.get("commits") or [] for f in [*(c.get("added") or []), *(c.get("modified") or [])]]
         before = p.get("before", "")
         first = not SHA_RE.match(before) or bool(ZERO_RE.match(before))  # a push that creates the branch: nothing to diff against

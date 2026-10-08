@@ -30,7 +30,7 @@ flowchart TD
 1. GitHub sends the event. The HMAC signature is checked; a bad one is rejected.
 2. `push`: accepted only if the repo is in `ALLOWED_REPOS` and the ref is its **default branch**. A push whose `before` is 40 zeros (first push of a branch) sets `FULL_SYNC=1`.
 3. The receiver creates a Kubernetes Job: `sync` (this one), `index` (merged review PR), `review` (review PR closed unmerged), `deploy` (docs site built), `revise` (reviewer requested changes, see step 6). The Job gets a 2 h deadline (`JOB_DEADLINE_SECONDS`, max 4 h) and is deleted 5 min after it ends.
-- Not started: repo not allowed, wrong branch, ping, bad signature. Check the receiver log (`kubectl -n multirepo logs deploy/multisync-webhook`) and the GitHub webhook "Recent deliveries".
+- Not started: repo not allowed, wrong branch, ping, bad signature, or the head commit message contains `[skip docs-sync]` (also `[skip docs]`, `[no docs]`; like `[skip ci]`: use it on reverts of test commits). Check the receiver log (`kubectl -n multirepo logs deploy/multisync-webhook`) and the GitHub webhook "Recent deliveries".
 
 ## 2. Job start (`scripts/job-entrypoint.sh`, mode `sync`)
 1. **Preflight**: Qdrant and the FactStore (Postgres) must answer, else the Job fails here.
