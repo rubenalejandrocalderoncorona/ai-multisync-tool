@@ -134,19 +134,23 @@ def segment_span(m: dict, now: datetime) -> dict:
 
 
 def _log_spans(client, project: str, spans: list[dict]):
-    """Phoenix's client RAISES (SpanCreationError) when some spans already exist, instead of returning the duplicate count; that is a normal re-run."""
+    """Phoenix's client RAISES (SpanCreationError) whenever any span already exists, even when the new ones were accepted in the same call, so a
+    run with some new review rows and some old ones always raises. That is normal. It is only a failure when Phoenix also reports INVALID spans."""
     try:
         return client.spans.log_spans(project_identifier=project, spans=spans)
     except Exception as e:  # noqa: BLE001 - recognised by name so this module imports without the Phoenix client
         if type(e).__name__ != "SpanCreationError":
             raise
-        import re
+        invalid = getattr(e, "total_invalid", None)
+        dup = getattr(e, "total_duplicates", None)
+        if dup is None or invalid is None:  # an older client without the counts: fall back to the message
+            import re
 
-        m = re.search(r"Found (\d+) duplicate", str(e))
-        n = int(m.group(1)) if m else len(spans)
-        if n < len(spans):
-            raise  # some spans were rejected for another reason: never report that as a duplicate run
-        return {"total_received": len(spans), "total_queued": 0, "total_duplicates": n}
+            m = re.search(r"Found (\d+) duplicate", str(e))
+            dup, invalid = (int(m.group(1)) if m else 0), (1 if re.search(r"invalid", str(e), re.I) else 0)
+        if invalid or not dup:
+            raise  # a span Phoenix refused: never report it as a duplicate run
+        return {"total_received": len(spans), "total_queued": max(0, len(spans) - dup), "total_duplicates": dup}
 
 
 def _retry_until_ingested(call, attempts: int = 8, delay: float = 4.0, sleep=time.sleep):
