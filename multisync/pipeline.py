@@ -514,7 +514,7 @@ def process_change(change: dict, deps) -> dict:
                      "changedFiles": changed_files, "symbols": patch_s.get("symbols") or []}
         verdict = run_judge(llm, tier=judge_tier, mode=mode, source=change["after"], draft=s["draft"], known_facts=s["knownFacts"], style_text=s["styleText"],
                             existing=change.get("existing") or "", changed_files=changed_files, related_code=s["relatedCode"], fact_sheet=sheet_text(s["factSheet"]),
-                            plan=plan_text(s["plan"]), scope=scope)
+                            plan=plan_text(s["plan"]), scope=scope, no_obligation_files=change.get("noObligationFiles"))
         failure = evaluate(verdict, t)
         if failure and scope and scope["changedIds"]:
             # The next attempt must not "fix" sections the change never touched.

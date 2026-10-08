@@ -19,17 +19,21 @@ def _clamp01(n) -> float:
 
 
 def judge(llm, *, mode="docs", source="", draft="", known_facts=None, style_text="", existing="", changed_files=None,
-          related_code="", fact_sheet="", plan="", tier=None, scope: dict | None = None) -> dict:
+          related_code="", fact_sheet="", plan="", tier=None, scope: dict | None = None, no_obligation_files=None) -> dict:
     """mode 'docs': source is a doc file. mode 'code': source is a code snapshot. `scope` (a patched page): {changedText, unchangedText, changedIds,
     diffText, changedFiles, symbols}; the judge then evaluates the changed sections, with the carried-over page as read-only context."""
     known_facts = known_facts or []
     changed_files = changed_files or []
+    exempt = [f for f in (no_obligation_files or []) if f]
     prompt = P.load_prompt("judge-code" if mode == "code" else "judge-docs")
     kf = "\n".join(known_facts) or "(none)"
     if mode == "code":
         user = (f"CODE:\n{source}\n\nCHANGED_FILES: {', '.join(changed_files) or '(unknown)'}\n\nEXISTING_PAGE:\n{existing or '(none)'}\n\n"
                 f"RELATED_CODE:\n{related_code or '(none)'}\n\nFACT_SHEET:\n{fact_sheet or '(none)'}\n\nPLAN:\n{plan or '(none)'}\n\n"
                 f"DRAFT:\n{draft}\n\nKNOWN_FACTS:\n{kf}\n\nSTYLE:\n{style_text or '(none)'}")
+        if exempt:
+            user += ("\n\nOUT_OF_SCOPE_FILES (added or removed by this commit, they define no public symbol): " + ", ".join(exempt)
+                     + "\nNo fact may be listed for these files, and the draft owes no sentence about their addition or removal.")
     else:
         user = f"SOURCE:\n{source}\n\nDRAFT:\n{draft}\n\nKNOWN_FACTS:\n{kf}\n\nSTYLE:\n{style_text or '(none)'}"
     system = prompt["text"]
@@ -49,6 +53,10 @@ def judge(llm, *, mode="docs", source="", draft="", known_facts=None, style_text
         r = llm.chat_json([*messages, {"role": "user", "content": "Your previous reply was not valid JSON. Reply again with ONLY the JSON object."}], tier=tier)
     claims = r.get("claims") if isinstance(r.get("claims"), list) else []
     facts = r.get("facts") if isinstance(r.get("facts"), list) else []
+    if exempt:
+        # A fact whose subject is only the arrival or removal of such a file is no obligation, even if the model lists it anyway.
+        names = {n for f in exempt for n in (f, f.rsplit("/", 1)[-1])}
+        facts = [f for f in facts if not (isinstance(f, dict) and any(n in str(f.get("text") or "") for n in names))]
     supported = sum(1 for c in claims if c.get("supported"))
     covered = sum(1 for f in facts if f.get("covered"))
     core = [f for f in facts if f.get("core")]

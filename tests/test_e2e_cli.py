@@ -140,7 +140,9 @@ def test_a_repository_with_a_sensitive_file_in_scope_is_blocked_before_anything_
         assert code == 0, out
         assert "onboarding blocked, nothing is embedded or sent to a model" in out
         d = json.loads((tmp_path / "pipeline-results.json").read_text())["results"][0]
-        assert d["outcome"] == "fallback" and d["rootCauseTag"] == "onboarding_blocked" and "look sensitive" in d["reason"] and "NOTES.md" in d["reason"]
+        assert d["outcome"] == "fallback" and d["rootCauseTag"] == "onboarding_blocked" and "look sensitive" in d["reason"]
+        # names stay in the Job log and the decision store, never in the reason that tickets and alerts carry
+        assert "NOTES.md" not in d["reason"] and "NOTES.md" in out and "NOTES.md" in d["metrics"]["onboardingBlockers"]
         assert fake.hits["embed"] == 0 and fake.hits["chat"] == 0, "no text left the machine"
         assert not (tmp_path / "site").exists()
     finally:

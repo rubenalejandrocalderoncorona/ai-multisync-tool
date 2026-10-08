@@ -9,12 +9,11 @@ Exit code 1 when there are blocking problems (no config entry, a page that match
 from __future__ import annotations
 
 import json
-import re
 import sys
 
 from .. import gitutil as G
 from ..chunker import chunk_code, chunk_markdown
-from ..codesource import matches_any, pages_scope, scrub, select_files, snapshot
+from ..codesource import DOCLIKE, SENSITIVE_CONTENT, SENSITIVE_PATH, matches_any, pages_scope, scrub, select_files, snapshot
 from ..config import load_config, read_json, repo_policy
 from ..contracts import validate_links
 from ..context import DOC_FILE
@@ -22,11 +21,6 @@ from ..coverage import check_coverage
 from ..prompts import load_styles, resolve_style
 from ..util import arg_value, attrs, print_table
 
-# Classification markers in document-type files (notes, exports, fixtures). Ordinary code that uses the word "restricted" is not flagged.
-SENSITIVE_CONTENT = re.compile(r"(classification\s*:[^\n]*\b(restricted|confidential|secret)\b|internal use only|do not distribute|strictly confidential|confidential and proprietary)", re.I)
-DOCLIKE = re.compile(r"\.(md|mdx|txt|csv|json|ya?ml)$", re.I)
-# Secret-type FILES and folders, not ordinary code that merely mentions credentials (features/credentials/data.ts is fine).
-SENSITIVE_PATH = re.compile(r"(^|/)(\.env(\..+)?$|[^/]*\.(pem|key|p12|pfx|keystore)$|id_(rsa|ed25519|ecdsa)$|credentials\.(json|ya?ml)$|secrets?\.(json|ya?ml)$|secrets?/)", re.I)
 EMBED_USD_PER_MTOK = 0.02  # text-embedding-3-small
 
 
@@ -38,6 +32,7 @@ def plan_onboarding(repo: str, policy, git, commit: str, styles: dict | None = N
         # problems of this repo's own entry, plus links other repos declare towards it
         warnings.extend(w for w in validate_links(repos_config) if w.startswith(f"{repo}:") or f"{repo} <->" in w or f"<-> {repo}:" in w)
     blockers: list[str] = []
+    public_blockers: list[str] = []  # the same blockers without file names: safe for tickets and anything public
     all_files = git.list_files(commit)
     exclude = policy.get("exclude") or []
     scope = pages_scope(policy.get("pages"))
@@ -99,7 +94,9 @@ def plan_onboarding(repo: str, policy, git, commit: str, styles: dict | None = N
         blockers.append("two pages share the same path")
     if sensitive:
         listed = ", ".join(sorted(sensitive)[:6]) + (", ..." if len(sensitive) > 6 else "")
-        blockers.append(f"{len(sensitive)} in-scope file(s) look sensitive (a secret-type path, or a \"restricted/confidential\" marker). Exclude them or confirm they may be sent to the model: {listed}")
+        head = f"{len(sensitive)} in-scope file(s) look sensitive (a secret-type path, or a \"restricted/confidential\" marker). Exclude them or confirm they may be sent to the model"
+        blockers.append(f"{head}: {listed}")
+        public_blockers.append(head)
     if secret_files:
         warnings.append(f"{len(secret_files)} file(s) contain lines that look like secrets; those lines are removed before anything is embedded ({', '.join(secret_files[:4])}{', ...' if len(secret_files) > 4 else ''})")
     if not (policy.get("docs") or []) and not doc_files:
@@ -117,6 +114,7 @@ def plan_onboarding(repo: str, policy, git, commit: str, styles: dict | None = N
         "semantic": {"files": len(doc_files), "chunks": doc_chunks + sum(1 for p in pages if p["hasBrief"])},
         "embeddings": {"tokens": tokens, "usd": round(tokens / 1e6 * EMBED_USD_PER_MTOK, 4)},
         "pages": pages, "warnings": warnings, "blockers": blockers,
+        "blockersPublic": [*(b for b in blockers if not b.startswith(f"{len(sensitive)} in-scope file(s) look sensitive")), *public_blockers],
     }
 
 

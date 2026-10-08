@@ -78,6 +78,10 @@ files, duplicate page paths, and files that look sensitive (secret-type paths, "
 It warns about: missing briefs or glossary, `trust: auto`, an unknown style, files with secret-looking lines (those lines are
 removed before embedding), and pages that cannot see most of their scope.
 
+Sensitive files never enter change detection, even when they are deleted: a removed secret-type file, or a file that only loses a
+"restricted/confidential" marker, produces no change, no draft and no mention in a page, a PR or a ticket (the Job log only counts them).
+The ticket for a blocked run does not name the files either; the names stay in the Job log and the decision record.
+
 On CalendarScheduler it showed 507 code files (977 chunks), about 400,000 tokens (under one cent), and that a single
 "web app" page would have been built from 24 of its 618 files. That is why the page was split.
 
